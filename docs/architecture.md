@@ -23,6 +23,25 @@ decoding or inference. Skipped inference is distinguishable from no detections.
 Images are streamed and all geometry is retained in memory. Long recordings
 may eventually justify an indexed, incremental analysis store.
 
+Optional dense analysis adds a separate path:
+
+```text
+VideoAnalysis + RGB decode -> per-face parser -> VideoParsing NPZ
+                                                 |
+                               ParsedFaceMask <--+
+```
+
+`parse_video` uses existing tracked observations and never repeats detection.
+`VideoParsing` stores one immutable `uint8` label grid per observed face, crop
+bounds, frame and analysis digests, source digest, and parser provenance. NPZ
+schema 1 contains compressed arrays and JSON metadata and loads with pickle
+disabled. Detection JSON remains schema 2 without dense image arrays. Changing
+mask configuration reuses labels. Changing tracked geometry invalidates them.
+Cache saves publish atomically and refuse existing files without explicit
+overwrite. `start`/`stop` allow partial analysis for experiments, while video
+export requires the complete interval. Dense grids remain in memory during
+analysis, so long recordings may need a future incremental cache writer.
+
 ## Images, coordinates, and composition
 
 Public images are nonempty `H x W x 3` NumPy arrays in RGB order with `uint8`
@@ -63,6 +82,49 @@ filter. Stale held geometry and tracking lag can still leave moving faces expose
 for existing experiments, with its inward linear feather convention. Both
 implementations return integer crop bounds and local alpha arrays. Mask
 sessions use only cached geometry and never run inference or alter analysis.
+
+`MaskProvider` is the extension contract for masks with independent analysis.
+It supplies `create_session()` with a frame-level `build` method and
+`validate_analysis(analysis)`. `MaskSession` delegates to providers. Video export
+validates a provider before encoding, while parsed frame sessions also check
+frame digests and dimensions for direct array use. The supplied RGB arrays must
+still correspond to those frames, which cannot be verified from geometry alone.
+
+`ParsedFaceMask` selects facial classes from BiSeNet's 19-class layout. Every
+face is parsed separately using a context-expanded square crop, with default
+side length 1.8 times the larger box dimension. Replicated padding and
+pixel-center sampling preserve crop coordinates at frame edges. Label lookup
+uses the un-clipped crop bounds, so clipping does not stretch a face. The
+OpenCV CPU adapter selects the named primary `output` head, uses upstream RGB
+normalization, and records the model digest. The pinned downloader supplies the
+ResNet34 model and upstream license. Neither inference nor rendering downloads.
+
+Components that contain tracked facial points are selected. Without valid
+seeds, the component with the greatest overlap with the track box is selected.
+This excludes disconnected neighboring faces, but touching components and bad
+tracks can remain ambiguous. Enclosed background holes are filled without
+filling excluded semantic classes. Accepted core pixels remain opaque.
+Outward smoothstep feathering is measured in source pixels and may enter only
+predicted background. A box-relative resampling of prior alpha stabilizes each
+track. Current coverage is retained, and excluded labels are vetoed last.
+Consequently, an old skin prediction cannot paint over current hair labels.
+
+A parse is rejected if its selected area is below 15 percent of the visible
+box area, its extent does not reach the expected upper face, chin, and sides,
+or a visible eye, nose, or mouth point lacks core coverage. Extent must span
+the box's central 30 percent horizontally, reach its upper 35 percent, and
+extend through 80 percent of its height. Raw observation landmarks are used
+when available because remapped tracked points can lag real image features.
+Existing caches lack explicit measurement links, so these are reconstructed
+with gated one-to-one IoU association. Tracked points are used without raw data.
+These thresholds are heuristic and do not measure silhouette accuracy. The
+default geometric fallback uses the measured box when available, favors
+coverage, and can include hair or ears.
+`fallback="error"` instead refuses the frame. Per-frame diagnostics distinguish
+accepted, held, and fallback cases. Unusable parses clear temporal history.
+Missing observations reuse the last accepted labels and freeze alpha. Gaps,
+absent IDs, and box IoU below 0.1 reset history. Stale held tracks still require
+motion-aware tracking to cover moving faces reliably.
 
 Each effect receives a private copy of the original RGB crop. Effects never
 read another face's transformed pixels. Results are blended in increasing track
@@ -197,6 +259,8 @@ alongside analysis JSON for reproducibility.
 - [OpenCV cascade classification](https://docs.opencv.org/4.x/db/d28/tutorial_cascade_classifier.html)
 - [OpenCV YuNet API and point layout](https://docs.opencv.org/4.x/df/d20/classcv_1_1FaceDetectorYN.html)
 - [OpenCV Zoo YuNet model and license](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)
+- [BiSeNet parser, preprocessing, and model releases](https://github.com/yakhyo/face-parsing)
+- [CelebAMask-HQ labels and dataset agreement](https://github.com/switchablenorms/CelebAMask-HQ)
 - [OpenCV headless packaging and bundled cascades](https://pypi.org/project/opencv-python-headless/)
 - [Video writer contracts and codec limitations](https://docs.opencv.org/4.x/dd/d9e/classcv_1_1VideoWriter.html)
 - [SciPy linear assignment](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html)

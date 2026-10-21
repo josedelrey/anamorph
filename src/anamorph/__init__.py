@@ -12,8 +12,24 @@ from .effects import (
     SpatialEffect,
     TemporalBlend,
 )
-from .masks import FaceMask, FaceMaskGeometry, LandmarkFaceMask, MaskRegion, MaskSession
-from .models import download_yunet_model
+from .masks import (
+    FaceMask,
+    FaceMaskGeometry,
+    LandmarkFaceMask,
+    MaskProvider,
+    MaskRegion,
+    MaskSession,
+)
+from .models import download_face_parser_model, download_yunet_model
+from .parsed_masks import ParsedFaceMask, ParsedMaskSession
+from .parsing import (
+    FACE_PARSING_LABELS,
+    BiSeNetFaceParser,
+    FaceParser,
+    FaceParsing,
+    VideoParsing,
+    parse_video,
+)
 from .tracking import IoUTracker
 from .types import Alpha, Box, Detection, EffectContext, Face, FrameAnalysis, Image, Landmarks
 from .video import (
@@ -28,6 +44,7 @@ from .video import (
 __all__ = [
     "Alpha",
     "Box",
+    "BiSeNetFaceParser",
     "Compose",
     "Detection",
     "Effect",
@@ -37,6 +54,9 @@ __all__ = [
     "FaceDetector",
     "FaceMask",
     "FaceMaskGeometry",
+    "FaceParser",
+    "FaceParsing",
+    "FACE_PARSING_LABELS",
     "FrameAnalysis",
     "FrameRenderer",
     "GaussianBlur",
@@ -46,8 +66,11 @@ __all__ = [
     "Landmarks",
     "LandmarkFaceMask",
     "MaskRegion",
+    "MaskProvider",
     "MaskSession",
     "Pixelate",
+    "ParsedFaceMask",
+    "ParsedMaskSession",
     "RenderReport",
     "SpatialEffect",
     "TemporalBlend",
@@ -55,10 +78,13 @@ __all__ = [
     "VideoError",
     "VideoExportWarning",
     "VideoInfo",
+    "VideoParsing",
     "YuNetFaceDetector",
     "alpha_composite",
     "analyze_video",
     "download_yunet_model",
+    "download_face_parser_model",
+    "parse_video",
     "process_video",
     "render_video",
 ]

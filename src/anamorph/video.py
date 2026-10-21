@@ -19,7 +19,7 @@ from .analysis import VideoAnalysis, VideoInfo, file_sha256
 from .compositing import FrameRenderer
 from .detection import FaceDetector, HaarFaceDetector
 from .effects import Effect
-from .masks import FaceMask, LandmarkFaceMask
+from .masks import FaceMask, LandmarkFaceMask, MaskProvider
 from .tracking import IoUTracker
 from .types import FrameAnalysis, Image
 
@@ -143,7 +143,7 @@ def render_video(
     *,
     analysis: VideoAnalysis,
     effect: Effect,
-    mask: FaceMask | LandmarkFaceMask | None = None,
+    mask: FaceMask | LandmarkFaceMask | MaskProvider | None = None,
     codec: str = "mp4v",
     overwrite: bool = False,
 ) -> RenderReport:
@@ -167,6 +167,8 @@ def render_video(
         raise ValueError("Video export currently requires even width and height")
     if file_sha256(source) != analysis.source_sha256:
         raise VideoError("Analysis source SHA-256 does not match this video")
+    if mask is not None and not isinstance(mask, (FaceMask, LandmarkFaceMask)):
+        mask.validate_analysis(analysis)
     warnings.warn(
         "Export uses constant frame rate and contains video only. Audio, subtitles, "
         "and source metadata are not copied.",
@@ -223,7 +225,7 @@ def process_video(
     output: str | Path,
     *,
     effect: Effect,
-    mask: FaceMask | LandmarkFaceMask | None = None,
+    mask: FaceMask | LandmarkFaceMask | MaskProvider | None = None,
     detector: FaceDetector | None = None,
     tracker: IoUTracker | None = None,
     detection_interval: int = 1,

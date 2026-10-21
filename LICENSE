@@ -24,3 +24,10 @@ Third-party dependencies are distributed separately under their own licenses.
 OpenCV's bundled cascade assets retain their upstream notices in the installed
 opencv-python-headless distribution. No third-party model or sample media is
 redistributed by Anamorph.
+
+The optional face-parsing adapter follows the preprocessing and label layout
+of yakhyo/face-parsing (https://github.com/yakhyo/face-parsing).
+Copyright (c) 2024 Yakhyokhuja Valikhujaev. The MIT permission and warranty
+terms above also apply to this upstream material. Downloaded weights retain
+their upstream license sidecar. The CelebAMask-HQ training-data agreement is
+separate from this code license and is linked in README.md.

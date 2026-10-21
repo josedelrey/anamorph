@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from .effects import Effect
-from .masks import FaceMask, LandmarkFaceMask, MaskSession
+from .masks import FaceMask, LandmarkFaceMask, MaskProvider, MaskSession
 from .types import EffectContext, FrameAnalysis, Image, validate_image
 
 
@@ -33,7 +33,9 @@ class FrameRenderer:
     Construct a fresh renderer for each sequence. Frame indices must increase.
     """
 
-    def __init__(self, effect: Effect, mask: FaceMask | LandmarkFaceMask | None = None) -> None:
+    def __init__(
+        self, effect: Effect, mask: FaceMask | LandmarkFaceMask | MaskProvider | None = None
+    ) -> None:
         self._session = effect.create_session()
         self.mask = mask if mask is not None else LandmarkFaceMask()
         self._masks = MaskSession(self.mask)

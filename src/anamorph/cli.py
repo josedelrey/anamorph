@@ -9,7 +9,9 @@ from .analysis import VideoAnalysis
 from .detection import HaarFaceDetector, YuNetFaceDetector
 from .effects import GaussianBlur, Pixelate
 from .masks import FaceMask, LandmarkFaceMask
-from .models import download_yunet_model
+from .models import download_face_parser_model, download_yunet_model
+from .parsed_masks import ParsedFaceMask
+from .parsing import BiSeNetFaceParser, VideoParsing, parse_video
 from .tracking import IoUTracker
 from .video import VideoError, analyze_video, render_video
 
@@ -48,6 +50,19 @@ def main(argv: list[str] | None = None) -> None:
         "download-yunet", help="Download pinned YuNet weights and license"
     )
     download.add_argument("destination", type=Path, help="Destination ONNX file path")
+    download_parser = commands.add_parser(
+        "download-face-parser", help="Download verified BiSeNet weights and license"
+    )
+    download_parser.add_argument("destination", type=Path)
+    parse = commands.add_parser("parse", help="Cache semantic face labels using existing analysis")
+    parse.add_argument("source", type=Path)
+    parse.add_argument("analysis", type=Path)
+    parse.add_argument("parsing", type=Path)
+    parse.add_argument("--model", type=Path, required=True)
+    parse.add_argument("--crop-scale", type=float, default=1.8)
+    parse.add_argument("--start", type=int, default=0)
+    parse.add_argument("--stop", type=int, default=None)
+    parse.add_argument("--overwrite", action="store_true")
     render = commands.add_parser("render", help="Render a video-only CFR output from analysis")
     render.add_argument("source")
     render.add_argument("analysis")
@@ -55,11 +70,25 @@ def main(argv: list[str] | None = None) -> None:
     render.add_argument("--effect", choices=["blur", "pixelate"], default="blur")
     render.add_argument("--sigma", type=float, default=12)
     render.add_argument("--cells", type=int, default=8)
-    render.add_argument("--shape", choices=["face", "ellipse", "rectangle"], default="face")
+    render.add_argument(
+        "--shape", choices=["face", "parsed", "ellipse", "rectangle"], default="face"
+    )
+    render.add_argument("--parsing", type=Path, help="Semantic cache required by --shape parsed")
+    render.add_argument(
+        "--fallback",
+        choices=["geometry", "error"],
+        default="geometry",
+        help="Unusable semantic parse policy (default: geometry)",
+    )
     render.add_argument("--scale-x", type=float, default=None)
     render.add_argument("--scale-y", type=float, default=None)
     render.add_argument("--offset-y", type=float, default=None)
-    render.add_argument("--feather", type=float, default=None)
+    render.add_argument(
+        "--feather",
+        type=float,
+        default=None,
+        help="Radius fraction for geometric masks, source pixels for parsed masks",
+    )
     render.add_argument(
         "--chin-extension",
         type=float,
@@ -70,7 +99,7 @@ def main(argv: list[str] | None = None) -> None:
         "--stabilization",
         type=float,
         default=0.65,
-        help="Face-mask current geometry weight in (0, 1] (default: 0.65)",
+        help="Current mask state weight in (0, 1] (default: 0.65)",
     )
     render.add_argument("--codec", default="mp4v")
     render.add_argument("--overwrite", action="store_true")
@@ -78,6 +107,26 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "download-yunet":
             print(f"YuNet model ready: {download_yunet_model(args.destination)}")
+        elif args.command == "download-face-parser":
+            print(f"BiSeNet model ready: {download_face_parser_model(args.destination)}")
+        elif args.command == "parse":
+            for original in (args.source, args.analysis, args.model):
+                if args.parsing.resolve() == original.resolve() or (
+                    args.parsing.exists() and original.exists() and args.parsing.samefile(original)
+                ):
+                    raise ValueError("Parsing output must differ from source, analysis, and model")
+            if args.parsing.exists() and not args.overwrite:
+                raise FileExistsError(args.parsing)
+            parsing = parse_video(
+                args.source,
+                analysis=VideoAnalysis.load(args.analysis),
+                parser=BiSeNetFaceParser(args.model),
+                crop_scale=args.crop_scale,
+                start=args.start,
+                stop=args.stop,
+            )
+            parsing.save(args.parsing, overwrite=args.overwrite)
+            print(f"Saved {len(parsing.frames)} parsed frames to {args.parsing}")
         elif args.command == "analyze":
             source, cache = Path(args.source), Path(args.analysis)
             if source.resolve() == cache.resolve() or (
@@ -113,15 +162,29 @@ def main(argv: list[str] | None = None) -> None:
                 for key in ("scale_x", "scale_y", "offset_y", "feather")
                 if getattr(args, key) is not None
             }
-            mask = (
-                LandmarkFaceMask(
-                    **mask_options,
+            if args.shape == "parsed":
+                if args.parsing is None:
+                    raise ValueError("--shape parsed requires --parsing")
+                if any(key != "feather" for key in mask_options):
+                    raise ValueError("Parsed masks do not use scale-x, scale-y, or offset-y")
+                mask = ParsedFaceMask(
+                    VideoParsing.load(args.parsing),
+                    feather=args.feather if args.feather is not None else 2,
                     stabilization=args.stabilization,
-                    chin_extension=args.chin_extension,
+                    fallback=args.fallback,
                 )
-                if args.shape == "face"
-                else FaceMask(shape=args.shape, **mask_options)
-            )
+            else:
+                if args.parsing is not None:
+                    raise ValueError("--parsing requires --shape parsed")
+                mask = (
+                    LandmarkFaceMask(
+                        **mask_options,
+                        stabilization=args.stabilization,
+                        chin_extension=args.chin_extension,
+                    )
+                    if args.shape == "face"
+                    else FaceMask(shape=args.shape, **mask_options)
+                )
             report = render_video(
                 args.source,
                 args.output,

@@ -1,4 +1,4 @@
-"""Explicit retrieval of the pinned OpenCV 4.x YuNet model and its license."""
+"""Explicit retrieval of pinned external models and their license sidecars."""
 
 from __future__ import annotations
 
@@ -30,6 +30,23 @@ _ASSETS = (
     (_MODEL_URL, 232589, YUNET_MODEL_SHA256, ""),
 )
 
+FACE_PARSER_REVISION = "8a4729d95118d0e97c44185f9bdef3d6bfeaaf99"
+FACE_PARSER_MODEL_SHA256 = "5b805bba7b5660ab7070b5a381dcf75e5b3e04199f1e9387232a77a00095102e"
+_PARSING_ASSETS = (
+    (
+        f"https://raw.githubusercontent.com/yakhyo/face-parsing/{FACE_PARSER_REVISION}/LICENSE",
+        1080,
+        "a4f7998feb5c90555daae4329db61caf7049e6b2706991dc1d9eb2a0923847ae",
+        ".LICENSE.txt",
+    ),
+    (
+        "https://github.com/yakhyo/face-parsing/releases/download/weights/resnet34.onnx",
+        93632554,
+        FACE_PARSER_MODEL_SHA256,
+        "",
+    ),
+)
+
 
 def download_yunet_model(destination: str | Path, *, timeout: float = 30) -> Path:
     """Download verified weights and a LICENSE.txt sidecar to an explicit path.
@@ -38,17 +55,34 @@ def download_yunet_model(destination: str | Path, *, timeout: float = 30) -> Pat
     with different content are rejected. All downloads are verified before
     publication. No model is included in the Anamorph distribution.
     """
+    return _download_assets(destination, _ASSETS, timeout, "YuNet")
+
+
+def download_face_parser_model(destination: str | Path, *, timeout: float = 120) -> Path:
+    """Download verified ResNet34 BiSeNet weights and the upstream MIT license.
+
+    The mutable upstream release URL is guarded by a fixed byte count and hash.
+    Model and license are external assets. CelebAMask-HQ training-data terms
+    are separate from the upstream code license. See the README before use.
+    Existing differing files are refused. Matching files are reused offline.
+    """
+    return _download_assets(destination, _PARSING_ASSETS, timeout, "BiSeNet")
+
+
+def _download_assets(
+    destination: str | Path, asset_specs: tuple, timeout: float, label: str
+) -> Path:
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be positive and finite")
     destination = Path(destination)
     assets = [
-        (Path(str(destination) + suffix), url, size, sha) for url, size, sha, suffix in _ASSETS
+        (Path(str(destination) + suffix), url, size, sha) for url, size, sha, suffix in asset_specs
     ]
     for path, _, size, sha in assets:
         if path.exists() and (
             path.stat().st_size != size or hashlib.sha256(path.read_bytes()).hexdigest() != sha
         ):
-            raise FileExistsError(f"Existing file does not match the pinned YuNet asset: {path}")
+            raise FileExistsError(f"Existing file does not match the pinned {label} asset: {path}")
     pending = []
     for path, url, size, sha in assets:
         if path.exists():
@@ -56,7 +90,7 @@ def download_yunet_model(destination: str | Path, *, timeout: float = 30) -> Pat
         with urlopen(url, timeout=timeout) as response:
             data = response.read(size + 1)
         if len(data) != size or hashlib.sha256(data).hexdigest() != sha:
-            raise ValueError(f"YuNet asset failed size/SHA-256 verification: {url}")
+            raise ValueError(f"{label} asset failed size/SHA-256 verification: {url}")
         pending.append((path, data))
     for path, data in pending:
         path.parent.mkdir(parents=True, exist_ok=True)

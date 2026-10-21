@@ -3,7 +3,7 @@ import io
 
 import pytest
 
-from anamorph import download_yunet_model, models
+from anamorph import download_face_parser_model, download_yunet_model, models
 from anamorph.cli import main
 
 
@@ -82,6 +82,17 @@ def test_download_cli(assets, tmp_path, capsys):
     main(["download-yunet", str(path)])
     assert path.exists()
     assert "YuNet model ready" in capsys.readouterr().out
+
+
+def test_face_parser_downloader_reuses_verification_contract(assets, monkeypatch, tmp_path, capsys):
+    _, calls = assets
+    monkeypatch.setattr(models, "_PARSING_ASSETS", models._ASSETS)
+    path = tmp_path / "parser.onnx"
+    assert download_face_parser_model(path) == path
+    assert len(calls) == 2
+    main(["download-face-parser", str(path)])
+    assert "BiSeNet model ready" in capsys.readouterr().out
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan")])

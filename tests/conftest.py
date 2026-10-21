@@ -11,6 +11,15 @@ def pytest_addoption(parser):
     parser.addoption(
         "--yunet-model", type=Path, help="Local YuNet ONNX model for offline integration tests"
     )
+    parser.addoption("--face-parser-model", type=Path, help="Local BiSeNet ONNX integration model")
+
+
+@pytest.fixture
+def face_parser_model(request):
+    path = request.config.getoption("--face-parser-model")
+    if path is None:
+        pytest.skip("Pass --face-parser-model PATH to exercise real BiSeNet inference")
+    return path
 
 
 @pytest.fixture

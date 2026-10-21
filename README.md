@@ -155,8 +155,8 @@ The immutable `Landmarks` representation pairs explicit `names` and `(x, y)`
 `points`. Analysis schema 2 stores them for raw detections and tracked faces.
 Existing schema-1 files load with absent landmarks and are upgraded in memory.
 Saving writes schema 2. The default mask uses these five landmarks when
-available, with an upright box-based fallback. Dense meshes and segmentation
-are future work.
+available, with an upright box-based fallback. Optional semantic parsing adds
+dense face boundaries through a separate cache, described below.
 
 For the CLI, select YuNet during analysis and reuse the resulting file normally:
 
@@ -237,6 +237,108 @@ boxes. `max_missing` counts decoded frames, including skipped inference frames.
 It must be at least `detection_interval - 1`. A frame record exposes `observed`
 and `missing_frames` for each face. IDs restart for each video.
 
+### Semantic face boundaries
+
+`BiSeNetFaceParser` adds pixel-level facial labels using the existing OpenCV CPU
+runtime. `ParsedFaceMask` includes skin, eyebrows, eyes, glasses, nose, mouth,
+and lips. It excludes predicted hair, ears, earrings, neck, necklace, clothing,
+and hats by default. It is optional because it requires external weights and
+adds inference per observed face. Geometric masks remain the default without it.
+
+Download the pinned ResNet34 model (about 94 MB) and its upstream license:
+
+```bash
+uv run anamorph download-face-parser local_inputs/models/face_parsing/resnet34.onnx
+```
+
+Reuse detection analysis, parse once, then reuse the labels for mask experiments:
+
+```python
+from anamorph import (
+    BiSeNetFaceParser,
+    GaussianBlur,
+    ParsedFaceMask,
+    VideoAnalysis,
+    VideoParsing,
+    parse_video,
+    render_video,
+)
+
+analysis = VideoAnalysis.load("outputs/analysis.json")
+parsing = parse_video(
+    "local_inputs/clip.mp4",
+    analysis=analysis,
+    parser=BiSeNetFaceParser("local_inputs/models/face_parsing/resnet34.onnx"),
+)
+parsing.save("outputs/parsing.npz")
+parsing = VideoParsing.load("outputs/parsing.npz")
+
+render_video(
+    "local_inputs/clip.mp4",
+    "outputs/parsed_blur.mp4",
+    analysis=analysis,
+    effect=GaussianBlur(16),
+    mask=ParsedFaceMask(parsing, feather=2, fallback="geometry"),
+)
+```
+
+`crop_scale=1.8` in `parse_video` expands each tracked box to a square with
+context. Crops use bilinear sampling and replicated borders. The parser uses
+512 x 512 RGB inputs, upstream channel normalization, and the primary 19-class
+output. It never downloads weights during construction or inference.
+
+The NPZ cache stores immutable label grids and JSON provenance, without pickle
+or RGB images. It is bound to the source bytes and the exact detection/track
+analysis. Retracking requires parsing again because it changes crop geometry.
+Changing `ParsedFaceMask.included_labels`, feathering, or stabilization reuses
+the same parsing. Extend the default `included_labels` tuple to add hair or ears.
+Full-face masks require all default facial classes to remain included. For
+other semantic selections, `FaceParsing.labels_at(x, y)` exposes full-frame labels.
+`save` refuses existing paths unless `overwrite=True`.
+
+Each face has a separate temporal session. Connected components are selected
+using that face's landmarks, or box overlap when landmarks are absent, to avoid
+including a disconnected neighbor. Enclosed background holes are filled while
+explicitly excluded classes remain excluded. Accepted facial pixels are fully
+opaque. `feather` is measured in **full-frame pixels** and extends into predicted
+background only. Class exclusions are applied after temporal filtering, so
+skin/hair edges may remain hard. Touching faces and incorrect predictions can
+still defeat component separation and boundary accuracy.
+
+Tiny regions, limited face extent, and uncovered visible feature points fail
+a coverage check. When raw detections are available, checks use their measured
+points instead of points remapped into smoothed boxes. Matching reconstructs
+measurement links using gated one-to-one box association. Without raw detections,
+tracked points remain estimates. By default, failed checks use a geometric
+fallback anchored to the measured box when available, which can include hair and
+ears. Set `fallback="error"` to refuse such frames. These checks are heuristics,
+not a complete silhouette assessment. `mask.create_session().diagnostics`
+reports `parsed`, `held`, `fallback_empty`, `fallback_incomplete`, or
+`fallback_missing` after `build(frame_analysis, width, height)`. Held tracks
+reuse their previous accepted labels and remain stale without motion prediction.
+
+Equivalent CLI commands and a comparison overlay:
+
+```bash
+uv run anamorph parse local_inputs/clip.mp4 outputs/analysis.json outputs/parsing.npz --model local_inputs/models/face_parsing/resnet34.onnx
+uv run anamorph render local_inputs/clip.mp4 outputs/analysis.json outputs/parsed_blur.mp4 --shape parsed --parsing outputs/parsing.npz
+uv run python examples/inspect_masks.py local_inputs/clip.mp4 outputs/analysis.json outputs/semantic_review --parsing outputs/parsing.npz
+```
+
+The overlay compares geometric and semantic masks. Orange means a geometric
+fallback. Its report counts fallbacks and checks for nonzero alpha on excluded
+labels in accepted parses. That checks an implementation invariant, not model
+accuracy. Preview faces remain visible. `parse` also accepts `--start` and
+`--stop` for a half-open frame interval. Partial caches work for inspection,
+while full video rendering requires a complete cache.
+
+The model comes from [yakhyo/face-parsing](https://github.com/yakhyo/face-parsing),
+whose code has an MIT license. Its weights were trained on
+[CelebAMask-HQ](https://github.com/switchablenorms/CelebAMask-HQ), whose published
+terms restrict the dataset and derived data to non-commercial research.
+External assets are separate from Anamorph's MIT code license. The downloader
+retains the upstream license beside the model and verifies both assets by hash.
+
 ### CLI and examples
 
 The CLI is a lightweight wrapper over the same Python functions:
@@ -286,8 +388,12 @@ test after downloading the weights:
 uv run pytest tests --yunet-model=local_inputs/models/yunet/face_detection_yunet_2023mar.onnx
 ```
 
-Without that option, only the real-model test skips. Test execution never
-downloads models or footage.
+Add `--face-parser-model=local_inputs/models/face_parsing/resnet34.onnx` to run
+the optional real BiSeNet test as well. Without model options, those integration
+tests skip. Test execution never downloads models or footage. Semantic tests
+cover class exclusions, multi-face component selection, temporal vetoes,
+fallbacks, crop coordinates, source/analysis binding, NPZ round trips, and exact
+lossless rendering without repeated inference.
 
 No natural video footage or external neural model is bundled. Tests do not
 measure real-world detector recall, tracking accuracy, or re-identification
@@ -299,9 +405,11 @@ an evaluation protocol.
 - The bundled detector targets frontal faces. Profiles, occlusion, small faces,
   and scene cuts can cause failures. Held boxes can miss moving faces, box
   smoothing can lag motion, and crossing faces can exchange IDs.
-- YuNet exposes five anatomical landmarks. Masks estimate tilted full-face
-  geometry and fall back to upright boxes. Exact hair/ear exclusion, dense
-  contours, segmentation, optical flow, and motion compensation are not implemented.
+- YuNet exposes five anatomical landmarks. Geometric masks estimate tilted
+  full-face coverage. Optional semantic masks exclude predicted hair and ears,
+  but small, dim, or occluded faces can require geometric fallbacks. Exact
+  anatomical exclusion and independent silhouette accuracy are not guaranteed.
+  Optical flow and motion compensation are not implemented.
 - Temporal blending resizes the previous crop into current crop coordinates.
   It can create ghosting and is not a tracking improvement.
 - Video export requires even dimensions and an available codec/container pair.
@@ -310,8 +418,8 @@ an evaluation protocol.
   verify frame count, dimensions, and frame rate before publication.
 - Processing is CPU-only. Effects operate on RGB crops of the input resolution,
   and composition uses encoded RGB values rather than linear-light color.
-- Current priority: mask coverage, boundaries, and stability on broader annotated
-  footage, followed by dense contours or face parsing where geometric masks fail.
+- Current priority: semantic mask coverage, boundaries, and stability on broader
+  annotated footage, especially small faces and occlusion in crowded scenes.
   New effects are deferred until mask quality is satisfactory.
   Sequence-level optimization and audio/VFR preservation
   need dedicated interfaces beyond the current causal streaming sessions.

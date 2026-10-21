@@ -4,11 +4,26 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import numpy as np
 
 from .types import Alpha, Box, FrameAnalysis, Landmarks
+
+if TYPE_CHECKING:
+    from .analysis import VideoAnalysis
+
+
+class FrameMaskSession(Protocol):
+    def build(self, frame: FrameAnalysis, width: int, height: int) -> dict[int, MaskRegion]: ...
+
+
+class MaskProvider(Protocol):
+    """Extension contract for masks with independent analysis or session state."""
+
+    def create_session(self) -> FrameMaskSession: ...
+
+    def validate_analysis(self, analysis: VideoAnalysis) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -255,8 +270,13 @@ class MaskSession:
     history. Held detections remain stale, just like the underlying analysis.
     """
 
-    def __init__(self, mask: FaceMask | LandmarkFaceMask | None = None) -> None:
+    def __init__(self, mask: FaceMask | LandmarkFaceMask | MaskProvider | None = None) -> None:
         self.mask = mask if mask is not None else LandmarkFaceMask()
+        self._delegate = (
+            None
+            if isinstance(self.mask, (FaceMask, LandmarkFaceMask))
+            else self.mask.create_session()
+        )
         self._history: dict[int, tuple[Box, np.ndarray]] = {}
         self._last_index = -1
         self._dimensions: tuple[int, int] | None = None
@@ -266,6 +286,10 @@ class MaskSession:
             raise ValueError("Frame indices must strictly increase in a mask session")
         if width <= 0 or height <= 0:
             raise ValueError("Frame dimensions must be positive")
+        if self._delegate is not None:
+            regions = self._delegate.build(frame, width, height)
+            self._last_index = frame.index
+            return regions
         if frame.index != self._last_index + 1 or self._dimensions != (width, height):
             self._history.clear()
         regions = {}
