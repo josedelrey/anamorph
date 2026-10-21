@@ -9,7 +9,11 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .tracking import IoUTracker
-from .types import Box, Detection, Face, FrameAnalysis
+from .types import Box, Detection, Face, FrameAnalysis, Landmarks
+
+
+def _load_landmarks(data: dict | None) -> Landmarks | None:
+    return None if data is None else Landmarks(data["names"], data["points"])
 
 
 def file_sha256(path: str | Path) -> str:
@@ -41,10 +45,10 @@ class VideoAnalysis:
     video: VideoInfo
     frames: tuple[FrameAnalysis, ...]
     provenance: dict = field(default_factory=dict)
-    schema_version: int = 1
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version != 2:
             raise ValueError("Unsupported analysis schema version")
         if (
             not isinstance(self.source_sha256, str)
@@ -88,7 +92,7 @@ class VideoAnalysis:
     def load(cls, path: str | Path) -> VideoAnalysis:
         try:
             data = json.loads(Path(path).read_text())
-            if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+            if type(data["schema_version"]) is not int or data["schema_version"] not in (1, 2):
                 raise ValueError("Unsupported analysis schema version")
             frames = tuple(
                 FrameAnalysis(
@@ -100,13 +104,18 @@ class VideoAnalysis:
                             observed=face["observed"],
                             missing_frames=face["missing_frames"],
                             confidence=face["confidence"],
+                            landmarks=_load_landmarks(face.get("landmarks")),
                         )
                         for face in frame["faces"]
                     ),
                     None
                     if frame.get("detections") is None
                     else tuple(
-                        Detection(Box(**detection["box"]), detection["confidence"])
+                        Detection(
+                            Box(**detection["box"]),
+                            detection["confidence"],
+                            _load_landmarks(detection.get("landmarks")),
+                        )
                         for detection in frame["detections"]
                     ),
                 )
@@ -117,7 +126,7 @@ class VideoAnalysis:
                 video=VideoInfo(**data["video"]),
                 frames=frames,
                 provenance=data["provenance"],
-                schema_version=data["schema_version"],
+                schema_version=2,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Invalid Anamorph analysis: {exc}") from exc

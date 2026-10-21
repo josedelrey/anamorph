@@ -63,15 +63,63 @@ class Box:
 
 
 @dataclass(frozen=True)
+class Landmarks:
+    """Named points in continuous full-frame pixels, x right and y down.
+
+    Names describe anatomical sides of the subject, rather than image sides.
+    Points may extend beyond a box or frame. Layouts are explicit and immutable.
+    """
+
+    names: tuple[str, ...]
+    points: tuple[tuple[float, float], ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.names, str):
+            raise ValueError("Landmark names must be a sequence of distinct nonempty strings")
+        names = tuple(self.names)
+        points = tuple(tuple(float(value) for value in point) for point in self.points)
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("Landmark names must be nonempty strings")
+        if len(set(names)) != len(names) or len(names) != len(points):
+            raise ValueError("Each landmark must have a distinct name and one point")
+        if any(len(point) != 2 or not all(math.isfinite(v) for v in point) for point in points):
+            raise ValueError("Landmarks must contain finite (x, y) pairs")
+        object.__setattr__(self, "names", names)
+        object.__setattr__(self, "points", points)
+
+    def __getitem__(self, name: str) -> tuple[float, float]:
+        try:
+            return self.points[self.names.index(name)]
+        except ValueError:
+            raise KeyError(name) from None
+
+    def remap(self, source: Box, target: Box) -> Landmarks:
+        """Preserve box-relative point positions under an axis-aligned box map."""
+        return Landmarks(
+            self.names,
+            tuple(
+                (
+                    target.x1 + (x - source.x1) * target.width / source.width,
+                    target.y1 + (y - source.y1) * target.height / source.height,
+                )
+                for x, y in self.points
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class Detection:
     box: Box
     confidence: float | None = None
+    landmarks: Landmarks | None = None
 
     def __post_init__(self) -> None:
         if self.confidence is not None and (
             not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1
         ):
             raise ValueError("Confidence must be None or a finite number in [0, 1]")
+        if self.landmarks is not None and not isinstance(self.landmarks, Landmarks):
+            raise ValueError("landmarks must be a Landmarks instance or None")
 
 
 @dataclass(frozen=True)
@@ -83,6 +131,7 @@ class Face:
     observed: bool = True
     missing_frames: int = 0
     confidence: float | None = None
+    landmarks: Landmarks | None = None
 
     def __post_init__(self) -> None:
         if type(self.track_id) is not int or self.track_id < 0:
@@ -91,7 +140,7 @@ class Face:
             raise ValueError("missing_frames must be a nonnegative integer")
         if type(self.observed) is not bool or self.observed != (self.missing_frames == 0):
             raise ValueError("observed must agree with missing_frames == 0")
-        Detection(self.box, self.confidence)
+        Detection(self.box, self.confidence, self.landmarks)
 
 
 @dataclass(frozen=True)

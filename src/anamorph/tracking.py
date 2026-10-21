@@ -8,13 +8,14 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from .types import Box, Detection, Face
+from .types import Box, Detection, Face, Landmarks
 
 
 @dataclass
 class _Track:
     box: Box
     confidence: float | None
+    landmarks: Landmarks | None = None
     missing: int = 0
 
 
@@ -24,6 +25,8 @@ class IoUTracker:
     max_missing counts decoded frames, including skipped inference frames.
     smoothing is the weight of the current observation (1 disables smoothing).
     No motion prediction, face recognition, or identity guarantee is implied.
+    Landmarks are mapped from the latest measured box into the smoothed box.
+    Held tracks retain both box and landmarks unchanged during missing frames.
     """
 
     def __init__(
@@ -74,6 +77,11 @@ class IoUTracker:
                     )
                 )
                 track.missing, track.confidence = 0, detection.confidence
+                track.landmarks = (
+                    detection.landmarks.remap(detection.box, track.box)
+                    if detection.landmarks is not None
+                    else None
+                )
             else:
                 track.missing += 1
                 if track.missing > self.max_missing:
@@ -82,10 +90,12 @@ class IoUTracker:
         used = set(matched.values())
         for index, detection in enumerate(detections):
             if index not in used:
-                self._tracks[self._next_id] = _Track(detection.box, detection.confidence)
+                self._tracks[self._next_id] = _Track(
+                    detection.box, detection.confidence, detection.landmarks
+                )
                 self._next_id += 1
 
         return tuple(
-            Face(i, t.box, t.missing == 0, t.missing, t.confidence)
+            Face(i, t.box, t.missing == 0, t.missing, t.confidence, t.landmarks)
             for i, t in sorted(self._tracks.items())
         )

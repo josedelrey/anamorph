@@ -14,7 +14,9 @@ Analysis is independent of effects and mask settings. It records one
 `FrameAnalysis` per decoded frame, source dimensions and FPS, the source SHA-256,
 detector settings and model digest, tracker parameters, inference interval, and
 library versions. Rendering validates the digest, metadata, and decoded frame
-count. Schema version 1 rejects unsupported versions and malformed core data.
+count. Schema version 2 includes named landmarks. The loader accepts schema 1,
+upgrades it in memory with absent landmarks, and rejects unsupported versions.
+Saving always writes schema 2.
 Raw detections are retained separately from tracked boxes so `analysis.retrack`
 can change association, smoothing, and hold parameters without repeating
 decoding or inference. Skipped inference is distinguishable from no detections.
@@ -53,6 +55,28 @@ internal resizing as needed and map detections back to original coordinates.
 The Haar adapter records the cascade digest and returns no confidence score
 because its output is not a calibrated probability.
 
+`YuNetFaceDetector` is the optional neural adapter. It uses the existing
+OpenCV DNN CPU backend with a local YuNet ONNX model and returns five points
+alongside boxes and model scores. A pinned OpenCV 4.x-compatible model is
+available through the explicit `download_yunet_model` helper and CLI command.
+Both the weights and the upstream license sidecar are verified by SHA-256.
+There is no network access during detector initialization or inference.
+
+Inference inputs are aspect-preserving area resizes bounded by `max_size`.
+The adapter uses the actual rounded width and height to map x and y coordinates
+back independently, then returns deterministic box-sorted results. It converts
+public RGB input to the backend's BGR format and updates input dimensions on
+every call, allowing serial reuse across resolutions. Model digest, resize
+policy, thresholds, and point layout are recorded in provenance. Instances
+contain mutable backend state and should not be shared across concurrent calls.
+
+`Landmarks` stores immutable named `(x, y)` pairs in full-frame coordinates.
+YuNet names follow OpenCV's anatomical right/left convention, ordered as right
+eye, left eye, nose tip, right mouth corner, left mouth corner. Coordinates are
+finite but may extend outside the frame or detector box. Other detectors can
+return different explicit layouts. Layout conversion must be an explicit
+operation, because different landmark schemes need not describe the same points.
+
 `IoUTracker` gates box-pair IoU, then uses SciPy's global linear assignment to
 maximize valid match count and summed IoU. Gating precedes assignment so invalid
 edges cannot steal valid matches. New IDs follow sorted detection coordinates.
@@ -60,6 +84,16 @@ The current observation has weight `smoothing` in the updated box. Unmatched
 tracks retain their last box for at most `max_missing` decoded frames.
 Reacquired tracks keep their IDs and expired IDs are never reused in a clip.
 `observed=False` distinguishes held boxes from measurements.
+
+Raw detections preserve their measured landmarks. Each tracked observation
+maps those points affinely from its measurement box into the smoothed track
+box, preserving box-relative geometry. Held tracks keep both box and points
+unchanged and report their missing-frame age. A new observation without
+landmarks clears old points. There is no independent temporal landmark filter
+or optical-flow prediction. This keeps tracking geometry consistent while
+allowing the original measurements to be inspected and retracked from cache.
+Effects receive tracked landmarks through `EffectContext.face`. Subtracting
+the crop bounds' `(x1, y1)` converts a full-frame point to crop-local pixels.
 
 Track IDs are local associations within a clip, not biometric identities.
 There is no motion prediction, recognition embedding, scene-cut detection, or
@@ -134,6 +168,8 @@ alongside analysis JSON for reproducibility.
 ## Upstream references
 
 - [OpenCV cascade classification](https://docs.opencv.org/4.x/db/d28/tutorial_cascade_classifier.html)
+- [OpenCV YuNet API and point layout](https://docs.opencv.org/4.x/df/d20/classcv_1_1FaceDetectorYN.html)
+- [OpenCV Zoo YuNet model and license](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)
 - [OpenCV headless packaging and bundled cascades](https://pypi.org/project/opencv-python-headless/)
 - [Video writer contracts and codec limitations](https://docs.opencv.org/4.x/dd/d9e/classcv_1_1VideoWriter.html)
 - [SciPy linear assignment](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html)

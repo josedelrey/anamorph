@@ -2,7 +2,7 @@
 
 from .analysis import VideoAnalysis, VideoInfo
 from .compositing import FrameRenderer, alpha_composite
-from .detection import FaceDetector, HaarFaceDetector
+from .detection import FaceDetector, HaarFaceDetector, YuNetFaceDetector
 from .effects import (
     Compose,
     Effect,
@@ -13,8 +13,9 @@ from .effects import (
     TemporalBlend,
 )
 from .masks import FaceMask, MaskRegion
+from .models import download_yunet_model
 from .tracking import IoUTracker
-from .types import Alpha, Box, Detection, EffectContext, Face, FrameAnalysis, Image
+from .types import Alpha, Box, Detection, EffectContext, Face, FrameAnalysis, Image, Landmarks
 from .video import (
     RenderReport,
     VideoError,
@@ -41,6 +42,7 @@ __all__ = [
     "HaarFaceDetector",
     "Image",
     "IoUTracker",
+    "Landmarks",
     "MaskRegion",
     "Pixelate",
     "RenderReport",
@@ -50,8 +52,10 @@ __all__ = [
     "VideoError",
     "VideoExportWarning",
     "VideoInfo",
+    "YuNetFaceDetector",
     "alpha_composite",
     "analyze_video",
+    "download_yunet_model",
     "process_video",
     "render_video",
 ]

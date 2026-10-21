@@ -10,6 +10,7 @@ from anamorph import (
     IoUTracker,
     Pixelate,
     TemporalBlend,
+    YuNetFaceDetector,
     analyze_video,
     render_video,
 )
@@ -19,9 +20,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("output_directory", type=Path)
+    parser.add_argument("--model", type=Path, help="Use a local YuNet ONNX model instead of Haar")
     args = parser.parse_args()
     args.output_directory.mkdir(parents=True, exist_ok=True)
-    analysis = analyze_video(args.source, tracker=IoUTracker(max_missing=5, smoothing=0.7))
+    analysis = analyze_video(
+        args.source,
+        tracker=IoUTracker(max_missing=5, smoothing=0.7),
+        detector=YuNetFaceDetector(args.model) if args.model else None,
+    )
     analysis.save(args.output_directory / "analysis.json")
     for name, effect in {
         "blur": GaussianBlur(sigma=16),

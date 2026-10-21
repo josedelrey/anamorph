@@ -101,6 +101,69 @@ maximum number of cells along each crop axis. `Compose(a, b)` applies `a`, then
 `b`, and composites once. `TemporalBlend` retains per-track history for the
 current render and demonstrates a causal temporal effect.
 
+### Neural detection and landmarks
+
+`YuNetFaceDetector` uses OpenCV's CPU neural detector and returns five named
+points: `right_eye`, `left_eye`, `nose_tip`, `right_mouth_corner`, and
+`left_mouth_corner`. Left and right refer to the subject's anatomical sides.
+No additional Python dependency is required. Download the pinned OpenCV 4.x
+model and its MIT license explicitly:
+
+```bash
+uv run anamorph download-yunet local_inputs/models/yunet/face_detection_yunet_2023mar.onnx
+```
+
+```python
+from anamorph import YuNetFaceDetector, analyze_video, download_yunet_model
+
+model = download_yunet_model("local_inputs/models/yunet/face_detection_yunet_2023mar.onnx")
+detector = YuNetFaceDetector(model, score_threshold=0.9, max_size=640)
+analysis = analyze_video("local_inputs/clip.mp4", detector=detector)
+
+for frame in analysis.frames:
+    for face in frame.faces:
+        if face.landmarks is not None:
+            print(frame.index, face.track_id, face.landmarks["nose_tip"])
+```
+
+The download helper verifies the model and license against pinned byte counts
+and SHA-256 hashes. Matching files are reused offline and different existing
+files are preserved. Detector construction and inference never download files.
+The default Haar detector remains available without a neural model.
+
+YuNet resizes the longest input dimension to at most `max_size`, preserves
+aspect ratio, and never upscales. Set `max_size=None` for native resolution.
+All returned boxes and landmarks use original-frame pixel coordinates,
+including separate x/y corrections for rounded resize dimensions. Scores are
+model outputs and are not calibrated probabilities. Thresholds, resizing,
+landmark layout, and the model digest are recorded in analysis provenance.
+Lowering `score_threshold` can improve recall while admitting more false
+positives. Native-resolution inference can help with small faces and costs
+more computation. Choose settings against representative annotated footage.
+For example, `YuNetFaceDetector(model, score_threshold=0.7, max_size=None)`
+provides a configuration to explore for higher recall on small faces. In the
+CLI the corresponding options are `--score-threshold 0.7 --max-size native`.
+
+Raw `Detection.landmarks` contain measured points. `Face.landmarks` map those
+points into the track's smoothed box while preserving their box-relative
+positions. Missing detections hold both box and points, with `observed=False`.
+These held points are stale estimates. Landmark shape is not independently
+smoothed. Effects can access `context.face.landmarks` and subtract the crop
+origin in `context.crop_bounds` to obtain crop-local coordinates.
+
+The immutable `Landmarks` representation pairs explicit `names` and `(x, y)`
+`points`. Analysis schema 2 stores them for raw detections and tracked faces.
+Existing schema-1 files load with absent landmarks and are upgraded in memory.
+Saving writes schema 2. Current masks continue to use boxes. Dense landmark
+meshes, segmentation, and landmark-driven mask boundaries are future work.
+
+For the CLI, select YuNet during analysis and reuse the resulting file normally:
+
+```bash
+uv run anamorph analyze local_inputs/clip.mp4 outputs/analysis.json --detector yunet --model local_inputs/models/yunet/face_detection_yunet_2023mar.onnx
+uv run python examples/process_video.py local_inputs/clip.mp4 outputs/comparison --model local_inputs/models/yunet/face_detection_yunet_2023mar.onnx
+```
+
 ### Masks and tracking
 
 `FaceMask` supports `ellipse` and `rectangle`. `scale_x` and `scale_y` multiply
@@ -156,6 +219,18 @@ tests deterministic. Lossless output is compared against direct array rendering
 pixel for pixel. MP4 export and the bundled detector are exercised separately.
 The FFV1 tests skip explicitly if that encoder is unavailable.
 
+YuNet unit tests cover original-coordinate mapping, RGB/BGR conversion,
+landmark naming, smoothed and held tracks, cache migration, and verified model
+downloads using controlled inputs. Run the optional real-model integration
+test after downloading the weights:
+
+```bash
+uv run pytest tests --yunet-model=local_inputs/models/yunet/face_detection_yunet_2023mar.onnx
+```
+
+Without that option, only the real-model test skips. Test execution never
+downloads models or footage.
+
 No natural video footage or external neural model is bundled. Tests do not
 measure real-world detector recall, tracking accuracy, or re-identification
 resistance. Those require representative, appropriately licensed footage and
@@ -166,8 +241,9 @@ an evaluation protocol.
 - The bundled detector targets frontal faces. Profiles, occlusion, small faces,
   and scene cuts can cause failures. Held boxes can miss moving faces, box
   smoothing can lag motion, and crossing faces can exchange IDs.
-- Masks are based on axis-aligned boxes. Landmarks, segmentation, optical flow,
-  and motion compensation are not implemented.
+- YuNet exposes five anatomical landmarks. Masks use axis-aligned boxes.
+  Segmentation, dense landmarks, optical flow, and motion compensation are
+  not implemented.
 - Temporal blending resizes the previous crop into current crop coordinates.
   It can create ghosting and is not a tracking improvement.
 - Video export requires even dimensions and an available codec/container pair.
@@ -176,9 +252,9 @@ an evaluation protocol.
   verify frame count, dimensions, and frame rate before publication.
 - Processing is CPU-only. Effects operate on RGB crops of the input resolution,
   and composition uses encoded RGB values rather than linear-light color.
-- Promising next work: a landmark-capable neural detector adapter, a small
-  annotated evaluation set, motion-aware tracking, and spectral or low-rank
-  spatial operators. Sequence-level optimization and audio/VFR preservation
+- Promising next work: broader annotated evaluation, landmark-driven alignment,
+  motion-aware tracking, and spectral or low-rank spatial operators.
+  Sequence-level optimization and audio/VFR preservation
   need dedicated interfaces beyond the current causal streaming sessions.
 
 Anamorph's code is MIT licensed. Dependency and bundled cascade licenses remain

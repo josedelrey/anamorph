@@ -6,10 +6,21 @@ import argparse
 from pathlib import Path
 
 from .analysis import VideoAnalysis
+from .detection import HaarFaceDetector, YuNetFaceDetector
 from .effects import GaussianBlur, Pixelate
 from .masks import FaceMask
+from .models import download_yunet_model
 from .tracking import IoUTracker
 from .video import VideoError, analyze_video, render_video
+
+
+def _inference_size(value: str) -> int | None:
+    if value == "native":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Use an integer pixel limit or 'native'") from None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -20,6 +31,23 @@ def main(argv: list[str] | None = None) -> None:
     analyze.add_argument("analysis")
     analyze.add_argument("--detection-interval", type=int, default=1)
     analyze.add_argument("--max-missing", type=int, default=5)
+    analyze.add_argument("--detector", choices=["haar", "yunet"], default="haar")
+    analyze.add_argument(
+        "--model", type=Path, help="Local YuNet ONNX model, required for --detector yunet"
+    )
+    analyze.add_argument("--score-threshold", type=float, default=0.9)
+    analyze.add_argument("--nms-threshold", type=float, default=0.3)
+    analyze.add_argument("--top-k", type=int, default=5000)
+    analyze.add_argument(
+        "--max-size",
+        type=_inference_size,
+        default=640,
+        help="Longest inference edge in pixels or 'native' (default: 640)",
+    )
+    download = commands.add_parser(
+        "download-yunet", help="Download pinned YuNet weights and license"
+    )
+    download.add_argument("destination", type=Path, help="Destination ONNX file path")
     render = commands.add_parser("render", help="Render a video-only CFR output from analysis")
     render.add_argument("source")
     render.add_argument("analysis")
@@ -36,14 +64,31 @@ def main(argv: list[str] | None = None) -> None:
     render.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.command == "analyze":
+        if args.command == "download-yunet":
+            print(f"YuNet model ready: {download_yunet_model(args.destination)}")
+        elif args.command == "analyze":
             source, cache = Path(args.source), Path(args.analysis)
             if source.resolve() == cache.resolve() or (
                 source.exists() and cache.exists() and source.samefile(cache)
             ):
                 raise ValueError("Analysis cache must differ from the source video")
+            if args.detector == "yunet":
+                if args.model is None:
+                    raise ValueError("--detector yunet requires --model with a local ONNX path")
+                detector = YuNetFaceDetector(
+                    args.model,
+                    score_threshold=args.score_threshold,
+                    nms_threshold=args.nms_threshold,
+                    top_k=args.top_k,
+                    max_size=args.max_size,
+                )
+            else:
+                if args.model is not None:
+                    raise ValueError("--model requires --detector yunet")
+                detector = HaarFaceDetector()
             analysis = analyze_video(
                 args.source,
+                detector=detector,
                 detection_interval=args.detection_interval,
                 tracker=IoUTracker(max_missing=args.max_missing),
             )

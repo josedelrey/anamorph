@@ -7,6 +7,20 @@ import pytest
 from anamorph import Box, Detection
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--yunet-model", type=Path, help="Local YuNet ONNX model for offline integration tests"
+    )
+
+
+@pytest.fixture
+def yunet_model(request):
+    path = request.config.getoption("--yunet-model")
+    if path is None:
+        pytest.skip("Pass --yunet-model PATH to exercise real YuNet inference without downloading")
+    return path
+
+
 @pytest.fixture
 def texture():
     return np.random.default_rng(42).integers(0, 256, (48, 64, 3), dtype=np.uint8)
