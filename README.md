@@ -30,13 +30,13 @@ alongside the headless package because they share the `cv2` namespace.
 ## Python API
 
 ```python
-from anamorph import FaceMask, GaussianBlur, process_video
+from anamorph import GaussianBlur, LandmarkFaceMask, process_video
 
 report = process_video(
     "local_inputs/clip.mp4",
     "outputs/blurred.mp4",
     effect=GaussianBlur(sigma=16),
-    mask=FaceMask(scale_x=1.35, scale_y=1.6, feather=0.12),
+    mask=LandmarkFaceMask(feather=0.08),
 )
 print(report.frame_count, report.output)
 ```
@@ -154,8 +154,9 @@ origin in `context.crop_bounds` to obtain crop-local coordinates.
 The immutable `Landmarks` representation pairs explicit `names` and `(x, y)`
 `points`. Analysis schema 2 stores them for raw detections and tracked faces.
 Existing schema-1 files load with absent landmarks and are upgraded in memory.
-Saving writes schema 2. Current masks continue to use boxes. Dense landmark
-meshes, segmentation, and landmark-driven mask boundaries are future work.
+Saving writes schema 2. The default mask uses these five landmarks when
+available, with an upright box-based fallback. Dense meshes and segmentation
+are future work.
 
 For the CLI, select YuNet during analysis and reuse the resulting file normally:
 
@@ -166,12 +167,69 @@ uv run python examples/process_video.py local_inputs/clip.mp4 outputs/comparison
 
 ### Masks and tracking
 
-`FaceMask` supports `ellipse` and `rectangle`. `scale_x` and `scale_y` multiply
-the detector box dimensions. `offset_y` shifts the center by a fraction of the
-original height. Positive offsets move downward. `feather` specifies the inward
-soft boundary as a fraction of the shape radius. Zero gives a hard edge.
-Expanded masks can include forehead, hair, and jaw areas beyond the detector
-box. They remain aligned when clipped at image edges.
+`LandmarkFaceMask` is the default for Python rendering and CLI `--shape face`.
+It targets the full face, including forehead, cheeks, and chin, with a broad
+upper contour and tapered jaw. The eye line guides roll. Landmark spacing
+constrains size, while the detector box anchors coverage when looking down or
+turning sideways. Missing or implausible points produce an upright fallback.
+This is an inspectable geometric estimate. Five points cannot locate the exact
+hairline, ears, or silhouette, so some overlap or exposed skin remains possible.
+
+`scale_x` and `scale_y` multiply estimated face dimensions. `offset_y` shifts
+along the face's downward axis by a fraction of box height. `feather=0.08`
+extends a smooth boundary **outside** the fully opaque core, by a fraction of
+the shape radius. Zero gives a hard edge. Increasing feather never weakens
+opaque core coverage. Clipping at frame edges preserves the original geometry.
+`chin_extension=0.10` extends the lower radius toward the jaw without lifting
+the top boundary into the hair. Defaults use `scale_x=1.12` and `scale_y=1.10`.
+
+Each renderer owns a `MaskSession`. It filters box-relative center, size, and
+roll per track with `stabilization=0.65` as the current observation weight.
+Position and scale follow the tracked box without extra filtering lag. The
+maximum of current and filtered masks retains current-frame coverage. Set
+`stabilization=1` to disable filtering. Absent tracks, frame gaps, resolution
+changes, invalid landmarks, and large box jumps reset history. Held detections
+freeze the filter and retain stale geometry, so moving faces can escape them.
+
+For array experiments, `mask.geometry(box, landmarks)` exposes the estimated
+center, radii, roll, and fallback flag. `mask.build(box, width, height,
+landmarks=points)` builds an independent mask. `mask.alpha_at(geometry, x, y)`
+samples continuous full-frame coordinates for numerical inspection.
+`MaskSession(mask).build(
+frame_analysis, width, height)` returns track-ID keyed `MaskRegion` objects
+with full-frame bounds and local `float32` alpha arrays. Sessions require
+increasing frame indices. No decoding or inference is needed for these calls.
+
+The original `FaceMask` remains available with unchanged `ellipse` and
+`rectangle` behavior, including its **inward** feather convention and box-axis
+offset. Explicit `FaceMask(...)` experiments retain their previous output.
+Omitting `mask` now selects `LandmarkFaceMask()`. Old analysis caches work via
+the upright fallback.
+
+Inspect boundaries on your footage before tuning effects:
+
+```bash
+uv run python examples/inspect_masks.py local_inputs/clip.mp4 outputs/analysis.json outputs/mask_review --start 0 --frames 200
+```
+
+This reuses analysis and produces a verified comparison video, still images,
+and a JSON settings report. Cyan contours mark the opaque core and white
+contours mark feather support. These translucent inspection previews reveal
+the original faces and **are not anonymized**. The report's tracked-landmark
+coverage of visible points is a diagnostic, not an independent face-area or
+privacy measurement. Offscreen landmarks are counted separately.
+
+For independent point annotations, `examples/evaluate_mask_coverage.py` compares
+legacy and full-face masks from cached analysis. Provide a JSONL file with one
+object per frame containing `frame_index` and `landmarks` as an `N x 2` list of
+full-frame coordinates. Use a single annotated subject per clip. The evaluation
+samples the containing pixel, measures the union of masks, and reports opaque
+point coverage and frames with exposed points. Point annotations do not define
+the entire face silhouette or establish performance on unseen footage.
+
+```bash
+uv run python examples/evaluate_mask_coverage.py outputs/analysis.json local_inputs/landmarks.jsonl outputs/mask_coverage.json
+```
 
 `IoUTracker` uses global one-to-one box association and optional exponential
 box smoothing. IDs persist through brief missed detections using static held
@@ -241,9 +299,9 @@ an evaluation protocol.
 - The bundled detector targets frontal faces. Profiles, occlusion, small faces,
   and scene cuts can cause failures. Held boxes can miss moving faces, box
   smoothing can lag motion, and crossing faces can exchange IDs.
-- YuNet exposes five anatomical landmarks. Masks use axis-aligned boxes.
-  Segmentation, dense landmarks, optical flow, and motion compensation are
-  not implemented.
+- YuNet exposes five anatomical landmarks. Masks estimate tilted full-face
+  geometry and fall back to upright boxes. Exact hair/ear exclusion, dense
+  contours, segmentation, optical flow, and motion compensation are not implemented.
 - Temporal blending resizes the previous crop into current crop coordinates.
   It can create ghosting and is not a tracking improvement.
 - Video export requires even dimensions and an available codec/container pair.
@@ -252,8 +310,9 @@ an evaluation protocol.
   verify frame count, dimensions, and frame rate before publication.
 - Processing is CPU-only. Effects operate on RGB crops of the input resolution,
   and composition uses encoded RGB values rather than linear-light color.
-- Promising next work: broader annotated evaluation, landmark-driven alignment,
-  motion-aware tracking, and spectral or low-rank spatial operators.
+- Current priority: mask coverage, boundaries, and stability on broader annotated
+  footage, followed by dense contours or face parsing where geometric masks fail.
+  New effects are deferred until mask quality is satisfactory.
   Sequence-level optimization and audio/VFR preservation
   need dedicated interfaces beyond the current causal streaming sessions.
 

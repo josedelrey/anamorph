@@ -32,10 +32,37 @@ The origin is the top-left, x increases rightward, and y increases downward.
 `[x1, x2) x [y1, y2)`. Coordinates can extend outside the image. Integer crops
 use floor for the minimum edge and ceil for the maximum, clipped to the frame.
 
-`FaceMask` expands and shifts the original box in continuous coordinates, then
-samples its shape at pixel centers. Clipping never recenters the shape. It
-returns a crop region and a local `float32` alpha array in `[0, 1]`. Feathering
-decreases alpha linearly inward from the shape boundary and has compact support.
+`LandmarkFaceMask` is the default. Its inspectable `FaceMaskGeometry` contains
+full-frame center, radii, roll in image coordinates, and a landmark-guided flag.
+The subject's eye line estimates roll within 60 degrees. Eye and mouth spacing
+constrain size within box-relative limits. The center remains anchored near the
+box center so foreshortened eye/mouth spacing cannot discard the forehead.
+Missing names, degenerate eyes, inverted nose/mouth ordering, implausible
+coordinates, or excessive roll produce an upright box-based fallback. Constants
+in this model are geometric heuristics, not learned anatomical measurements.
+
+The core is an asymmetric superellipse with exponent 2.6, a configurable lower
+radius extension (10 percent by default), and lower-face width taper up to
+8 percent. Pixel-center sampling produces
+`float32` alpha in `[0, 1]`. The core stays opaque and compact smoothstep
+feathering extends outward in normalized radial distance. Feather width is
+relative to shape radius, so it is not a constant pixel-distance border.
+Clipping never recenters or rescales geometry. These five landmarks cannot
+resolve exact hairlines, ears, or occlusion boundaries.
+
+`MaskSession.build(frame_analysis, width, height)` returns regions keyed by
+track ID. A box-relative EMA filters geometry without adding translation or
+scale lag to tracked boxes. Its output is combined with the current unfiltered
+mask using pointwise maximum, so temporal stabilization cannot reduce current
+mask coverage. This can modestly broaden the boundary during changes. State
+is private to a render and track. Gaps, absent IDs, dimension changes, fallback
+geometry, and box IoU below 0.1 reset history. Held observations freeze the
+filter. Stale held geometry and tracking lag can still leave moving faces exposed.
+
+`FaceMask` retains the original axis-aligned ellipse/rectangle implementation
+for existing experiments, with its inward linear feather convention. Both
+implementations return integer crop bounds and local alpha arrays. Mask
+sessions use only cached geometry and never run inference or alter analysis.
 
 Each effect receives a private copy of the original RGB crop. Effects never
 read another face's transformed pixels. Results are blended in increasing track

@@ -14,6 +14,8 @@ from anamorph import (
     GaussianBlur,
     HaarFaceDetector,
     IoUTracker,
+    LandmarkFaceMask,
+    Landmarks,
     Pixelate,
     SpatialEffect,
     VideoAnalysis,
@@ -84,6 +86,39 @@ def test_mp4_convenience_pipeline(video, detector, tmp_path):
     with pytest.warns(VideoExportWarning):
         report = process_video(source, output, detector=detector, effect=Pixelate(3))
     assert report.frame_count == len(read_frames(output)) == 6
+
+
+def test_lossless_landmark_mask_pipeline(video, detector, tmp_path):
+    source, frames = video
+    analysis = analyze_video(source, detector=detector)
+    names = ("right_eye", "left_eye", "nose_tip", "right_mouth_corner", "left_mouth_corner")
+    marked = tuple(
+        replace(
+            record,
+            faces=(
+                replace(
+                    record.faces[0],
+                    landmarks=Landmarks(
+                        names,
+                        ((22, 20), (34, 20 + i % 2), (28, 25), (24, 30), (32, 30)),
+                    ),
+                ),
+            ),
+        )
+        for i, record in enumerate(analysis.frames)
+    )
+    analysis = replace(analysis, frames=marked)
+    output = tmp_path / "landmark_masks.avi"
+    mask = LandmarkFaceMask()
+    with pytest.warns(VideoExportWarning):
+        render_video(source, output, analysis=analysis, effect=Pixelate(2), mask=mask, codec="FFV1")
+    renderer = FrameRenderer(Pixelate(2), mask)
+    decoded = read_frames(output)
+    assert len(decoded) == len(frames)
+    for index, image in enumerate(decoded):
+        expected = renderer.render(frames[index], marked[index], timestamp=index / 12)
+        np.testing.assert_array_equal(image, expected)
+    assert detector.calls == 6
 
 
 def test_detection_interval_and_held_records(video, detector):

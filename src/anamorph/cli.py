@@ -8,7 +8,7 @@ from pathlib import Path
 from .analysis import VideoAnalysis
 from .detection import HaarFaceDetector, YuNetFaceDetector
 from .effects import GaussianBlur, Pixelate
-from .masks import FaceMask
+from .masks import FaceMask, LandmarkFaceMask
 from .models import download_yunet_model
 from .tracking import IoUTracker
 from .video import VideoError, analyze_video, render_video
@@ -55,11 +55,23 @@ def main(argv: list[str] | None = None) -> None:
     render.add_argument("--effect", choices=["blur", "pixelate"], default="blur")
     render.add_argument("--sigma", type=float, default=12)
     render.add_argument("--cells", type=int, default=8)
-    render.add_argument("--shape", choices=["ellipse", "rectangle"], default="ellipse")
-    render.add_argument("--scale-x", type=float, default=1.25)
-    render.add_argument("--scale-y", type=float, default=1.5)
-    render.add_argument("--offset-y", type=float, default=-0.05)
-    render.add_argument("--feather", type=float, default=0.15)
+    render.add_argument("--shape", choices=["face", "ellipse", "rectangle"], default="face")
+    render.add_argument("--scale-x", type=float, default=None)
+    render.add_argument("--scale-y", type=float, default=None)
+    render.add_argument("--offset-y", type=float, default=None)
+    render.add_argument("--feather", type=float, default=None)
+    render.add_argument(
+        "--chin-extension",
+        type=float,
+        default=0.10,
+        help="Face-mask lower radius extension in [0, 1] (default: 0.10)",
+    )
+    render.add_argument(
+        "--stabilization",
+        type=float,
+        default=0.65,
+        help="Face-mask current geometry weight in (0, 1] (default: 0.65)",
+    )
     render.add_argument("--codec", default="mp4v")
     render.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
@@ -96,12 +108,26 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Saved {len(analysis.frames)} analyzed frames to {args.analysis}")
         else:
             effect = GaussianBlur(args.sigma) if args.effect == "blur" else Pixelate(args.cells)
+            mask_options = {
+                key: getattr(args, key)
+                for key in ("scale_x", "scale_y", "offset_y", "feather")
+                if getattr(args, key) is not None
+            }
+            mask = (
+                LandmarkFaceMask(
+                    **mask_options,
+                    stabilization=args.stabilization,
+                    chin_extension=args.chin_extension,
+                )
+                if args.shape == "face"
+                else FaceMask(shape=args.shape, **mask_options)
+            )
             report = render_video(
                 args.source,
                 args.output,
                 analysis=VideoAnalysis.load(args.analysis),
                 effect=effect,
-                mask=FaceMask(args.shape, args.scale_x, args.scale_y, args.offset_y, args.feather),
+                mask=mask,
                 codec=args.codec,
                 overwrite=args.overwrite,
             )

@@ -12,7 +12,7 @@ from .effects import (
     SpatialEffect,
     TemporalBlend,
 )
-from .masks import FaceMask, MaskRegion
+from .masks import FaceMask, FaceMaskGeometry, LandmarkFaceMask, MaskRegion, MaskSession
 from .models import download_yunet_model
 from .tracking import IoUTracker
 from .types import Alpha, Box, Detection, EffectContext, Face, FrameAnalysis, Image, Landmarks
@@ -36,6 +36,7 @@ __all__ = [
     "Face",
     "FaceDetector",
     "FaceMask",
+    "FaceMaskGeometry",
     "FrameAnalysis",
     "FrameRenderer",
     "GaussianBlur",
@@ -43,7 +44,9 @@ __all__ = [
     "Image",
     "IoUTracker",
     "Landmarks",
+    "LandmarkFaceMask",
     "MaskRegion",
+    "MaskSession",
     "Pixelate",
     "RenderReport",
     "SpatialEffect",

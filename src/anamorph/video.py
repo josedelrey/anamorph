@@ -19,7 +19,7 @@ from .analysis import VideoAnalysis, VideoInfo, file_sha256
 from .compositing import FrameRenderer
 from .detection import FaceDetector, HaarFaceDetector
 from .effects import Effect
-from .masks import FaceMask
+from .masks import FaceMask, LandmarkFaceMask
 from .tracking import IoUTracker
 from .types import FrameAnalysis, Image
 
@@ -143,7 +143,7 @@ def render_video(
     *,
     analysis: VideoAnalysis,
     effect: Effect,
-    mask: FaceMask | None = None,
+    mask: FaceMask | LandmarkFaceMask | None = None,
     codec: str = "mp4v",
     overwrite: bool = False,
 ) -> RenderReport:
@@ -223,7 +223,7 @@ def process_video(
     output: str | Path,
     *,
     effect: Effect,
-    mask: FaceMask | None = None,
+    mask: FaceMask | LandmarkFaceMask | None = None,
     detector: FaceDetector | None = None,
     tracker: IoUTracker | None = None,
     detection_interval: int = 1,

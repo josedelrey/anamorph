@@ -5,9 +5,9 @@ from pathlib import Path
 
 from anamorph import (
     Compose,
-    FaceMask,
     GaussianBlur,
     IoUTracker,
+    LandmarkFaceMask,
     Pixelate,
     TemporalBlend,
     YuNetFaceDetector,
@@ -39,7 +39,7 @@ def main() -> None:
             args.output_directory / f"{name}.mp4",
             analysis=analysis,
             effect=effect,
-            mask=FaceMask(shape="ellipse", scale_x=1.35, scale_y=1.6, feather=0.12),
+            mask=LandmarkFaceMask(),
         )
         print(
             f"{report.output}: {report.frame_count} frames, {report.face_instances} face instances"
