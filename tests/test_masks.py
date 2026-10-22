@@ -13,11 +13,55 @@ from anamorph import (
     LandmarkFaceMask,
     Landmarks,
     MaskSession,
+    PerFaceMask,
     SpatialEffect,
 )
 
 BOX = Box(20, 20, 100, 120)
 NAMES = ("right_eye", "left_eye", "nose_tip", "right_mouth_corner", "left_mouth_corner")
+
+
+def test_per_face_mask_copies_overrides_and_preserves_defaults():
+    default = LandmarkFaceMask(feather=0)
+    override = LandmarkFaceMask(scale_x=0.5, feather=0)
+    overrides = {1: override}
+    mask = PerFaceMask(default, overrides)
+    overrides.clear()
+    with pytest.raises(TypeError):
+        mask.overrides[0] = default
+    faces = FrameAnalysis(0, (Face(0, BOX), Face(1, BOX)))
+    regions = MaskSession(mask).build(faces, 160, 160)
+    np.testing.assert_array_equal(full(regions[0]), full(default.build(BOX, 160, 160)))
+    np.testing.assert_array_equal(full(regions[1]), full(override.build(BOX, 160, 160)))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {-1: LandmarkFaceMask()},
+        {True: LandmarkFaceMask()},
+        {"1": LandmarkFaceMask()},
+        {1: object()},
+    ],
+)
+def test_per_face_mask_rejects_invalid_overrides(overrides):
+    with pytest.raises(ValueError):
+        PerFaceMask(overrides=overrides)
+
+
+def test_nested_per_face_masks_select_only_requested_tracks():
+    default = LandmarkFaceMask(feather=0)
+    narrow = LandmarkFaceMask(scale_x=0.5, feather=0)
+    nested = PerFaceMask(default, {1: narrow})
+    session = PerFaceMask(nested, {0: narrow}).create_session()
+    frame = FrameAnalysis(0, (Face(0, BOX), Face(1, BOX), Face(2, BOX)))
+    regions = session.build(frame, 160, 160)
+    assert regions.keys() == {0, 1, 2}
+    assert session.diagnostics == {0: "geometry", 1: "geometry", 2: "geometry"}
+    np.testing.assert_array_equal(full(regions[0]), full(regions[1]))
+    assert full(regions[2]).sum() > full(regions[1]).sum()
+    with pytest.raises(ValueError, match="increase"):
+        session.build(frame, 160, 160)
 
 
 def points(angle=0, dx=0, dy=0):

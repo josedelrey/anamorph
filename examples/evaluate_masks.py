@@ -10,14 +10,19 @@ import hashlib
 import inspect
 import json
 from collections import Counter
-from dataclasses import asdict
 from pathlib import Path
 
 import cv2
 import numpy as np
 from scipy.ndimage import binary_erosion, distance_transform_edt
 
-from anamorph import LandmarkFaceMask, MaskSession, ParsedFaceMask, VideoAnalysis, VideoParsing
+from anamorph import (
+    LandmarkFaceMask,
+    ParsedFaceMask,
+    PerFaceMask,
+    VideoAnalysis,
+    VideoParsing,
+)
 from anamorph.analysis import file_sha256
 from anamorph.evaluation import evaluate_mask, polygon_mask, temporal_error_change
 
@@ -46,6 +51,30 @@ def frame_alpha(region, width, height):
     return alpha
 
 
+def configured_mask(configuration, parsing=None):
+    """Small experiment-file adapter. Python constructors remain the public API."""
+    options = dict(configuration)
+    kind = options.pop("kind", "parsed" if parsing is not None else "face")
+    if kind == "face":
+        return LandmarkFaceMask(**options)
+    if kind != "parsed" or parsing is None:
+        raise ValueError("Choose kind='face', or kind='parsed' with parsing caches")
+    if "fallback_mask" in options:
+        options["fallback_mask"] = LandmarkFaceMask(**options["fallback_mask"])
+    return ParsedFaceMask(parsing, **options)
+
+
+def experiment_mask(configuration, parsing=None):
+    if set(configuration) - {"default", "overrides"}:
+        raise ValueError("Configuration accepts default and overrides only")
+    overrides = {}
+    for key, value in configuration.get("overrides", {}).items():
+        if not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key:
+            raise ValueError("Override keys must be canonical nonnegative track IDs")
+        overrides[int(key)] = configured_mask(value, parsing)
+    return PerFaceMask(configured_mask(configuration.get("default", {}), parsing), overrides)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
@@ -53,6 +82,7 @@ def main():
     parser.add_argument("references", type=Path)
     parser.add_argument("output_directory", type=Path)
     parser.add_argument("--parsing", type=Path, nargs="+", default=[])
+    parser.add_argument("--config", type=Path, help="JSON default mask and per-track overrides")
     args = parser.parse_args()
     analysis = VideoAnalysis.load(args.analysis)
     refs = json.loads(args.references.read_text())
@@ -86,8 +116,13 @@ def main():
     args.output_directory.mkdir(parents=True, exist_ok=True)
     if any(args.output_directory.iterdir()):
         parser.error("Choose an empty output directory to preserve existing results")
-    masks = [ParsedFaceMask(c) for c in caches] if caches else [LandmarkFaceMask()]
-    sessions = [mask.create_session() if caches else MaskSession(mask) for mask in masks]
+    configuration = json.loads(args.config.read_text()) if args.config else {}
+    masks = (
+        [experiment_mask(configuration, c) for c in caches]
+        if caches
+        else [experiment_mask(configuration)]
+    )
+    sessions = [mask.create_session() for mask in masks]
     rows, changes, previous = [], [], {}
     capture = cv2.VideoCapture(str(args.source))
     try:
@@ -127,11 +162,7 @@ def main():
             for item in sample["faces"]:
                 reference, excluded, ignore = reference_arrays(item, width, height)
                 alpha = frame_alpha(regions.get(item["track_id"]), width, height)
-                status = (
-                    session.diagnostics.get(item["track_id"], "missing_track")
-                    if caches
-                    else ("geometry" if item["track_id"] in regions else "missing_track")
-                )
+                status = session.diagnostics.get(item["track_id"], "missing_track")
                 result = evaluate_mask(alpha, reference, exclusions=excluded, ignore=ignore)
                 rows.append(
                     {
@@ -191,8 +222,12 @@ def main():
         "parsing_sha256": [file_sha256(p) for p in args.parsing],
         "opencv": cv2.__version__,
         "numpy": np.__version__,
-        "mask_implementation_sha256": file_sha256(inspect.getfile(type(masks[0]))),
-        "mask": "parsed_defaults" if caches else asdict(masks[0]),
+        "mask_implementation_sha256": {
+            cls.__name__: file_sha256(inspect.getfile(cls))
+            for cls in (LandmarkFaceMask, ParsedFaceMask, PerFaceMask)
+        },
+        "mask_configuration": configuration,
+        "default_kind": "parsed" if caches else "face",
         "face_samples": len(rows),
         "area_weighted_missed_opaque_face_fraction": (
             sum(r["missed_opaque_face_pixels"] for r in rows) / face_area

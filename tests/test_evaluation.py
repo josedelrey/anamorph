@@ -110,8 +110,9 @@ def test_temporal_invalid_shapes_and_ignored_pairs():
         temporal_error_change(alpha, ref, alpha[:8], ref[:8])
 
 
+@pytest.mark.parametrize("use_config", [False, True])
 def test_evaluation_example_replays_video_and_counts_missing_tracks(
-    video, detector, tmp_path, monkeypatch
+    video, detector, tmp_path, monkeypatch, use_config
 ):
     import hashlib
     import json
@@ -154,9 +155,16 @@ def test_evaluation_example_replays_video_and_counts_missing_tracks(
         )
     )
     output = tmp_path / "review"
-    monkeypatch.setattr(
-        sys, "argv", ["evaluate_masks", str(source), str(cache), str(references), str(output)]
-    )
+    argv = ["evaluate_masks", str(source), str(cache), str(references), str(output)]
+    if use_config:
+        configuration = tmp_path / "settings.json"
+        configuration.write_text(
+            json.dumps(
+                {"default": {"kind": "face"}, "overrides": {"0": {"kind": "face", "scale_x": 0.7}}}
+            )
+        )
+        argv += ["--config", str(configuration)]
+    monkeypatch.setattr(sys, "argv", argv)
     runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "examples/evaluate_masks.py"), run_name="__main__"
     )
@@ -165,6 +173,7 @@ def test_evaluation_example_replays_video_and_counts_missing_tracks(
     assert report["samples"][1]["missed_opaque_face_fraction"] == 1
     assert len(report["adjacent_frame_error_changes"]) == 1
     assert detector.calls == 6
+    assert bool(report["mask_configuration"]) == use_config
     before = (output / "report.json").read_bytes()
     with pytest.raises(SystemExit):
         runpy.run_path(

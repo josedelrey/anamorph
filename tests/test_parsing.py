@@ -14,9 +14,11 @@ from anamorph import (
     FaceParsing,
     FrameAnalysis,
     FrameRenderer,
+    LandmarkFaceMask,
     Landmarks,
     MaskSession,
     ParsedFaceMask,
+    PerFaceMask,
     Pixelate,
     VideoAnalysis,
     VideoExportWarning,
@@ -85,6 +87,111 @@ def test_semantic_core_opaque_with_explicit_hair_ear_neck_exclusions():
     assert np.all(result[data == 1] == 1)
     assert np.all(result[np.isin(data, [7, 8, 14, 17])] == 0)
     assert np.any((result > 0) & (result < 1) & (data == 0))
+
+
+def test_expansion_grows_core_in_pixels_without_crossing_excluded_classes():
+    analysis, parsing = cache()
+    base = full(
+        ParsedFaceMask(parsing, feather=0).create_session().build(analysis.frames[0], 64, 48)[0]
+    )
+    grown = full(
+        ParsedFaceMask(parsing, feather=0, expansion=2)
+        .create_session()
+        .build(analysis.frames[0], 64, 48)[0]
+    )
+    assert base[10, 25] == 0 and grown[10, 25] == 1
+    assert np.all(grown[base == 1] == 1)
+    assert np.all(grown[np.isin(labels(), [7, 8, 14, 17])] == 0)
+    assert grown.dtype == np.float32
+
+
+def test_negative_expansion_erodes_core_before_feathering():
+    analysis, parsing = cache()
+    region = (
+        ParsedFaceMask(parsing, feather=0, expansion=-2)
+        .create_session()
+        .build(analysis.frames[0], 64, 48)[0]
+    )
+    expected = np.zeros((48, 64), np.float32)
+    expected[10:22, 10:22] = 1
+    np.testing.assert_array_equal(full(region), expected)
+
+
+def test_boundary_class_tolerance_is_explicit_and_limited_to_the_margin():
+    analysis, parsing = cache()
+    mask = ParsedFaceMask(
+        parsing, expansion=2, feather=0, boundary_labels=("background", "hair", "neck")
+    )
+    alpha = full(mask.create_session().build(analysis.frames[0], 64, 48)[0])
+    assert alpha[6, 16] == 1 and alpha[5, 16] == 0
+    assert alpha[25, 16] == 1 and alpha[26, 16] == 0
+    assert np.all(alpha[np.isin(labels(), [7, 8])] == 0)
+
+
+def test_total_erosion_does_not_revive_temporal_history():
+    big, small = labels(), labels()
+    small[8:24, 8:24] = 0
+    small[12:20, 12:20] = 1
+    # Missing landmarks allow a smaller usable core, still checked against box extent.
+    face = replace(FACE, landmarks=None, box=Box(10, 10, 22, 22))
+    frames = (FrameAnalysis(0, (face,)), FrameAnalysis(1, (face,)))
+    analysis, parsing = cache(frames, [(big,), (small,)])
+    session = ParsedFaceMask(parsing, expansion=-5, feather=3, stabilization=0.1).create_session()
+    assert np.any(full(session.build(analysis.frames[0], 64, 48)[0]))
+    assert not np.any(full(session.build(analysis.frames[1], 64, 48)[0]))
+    assert session.diagnostics == {0: "parsed"}
+
+
+def test_custom_fallback_geometry_is_independent_of_semantic_boundary_edits():
+    analysis, parsing = cache(maps=[(np.zeros((48, 64), np.uint8),)])
+    geometry = LandmarkFaceMask(scale_x=1.5, scale_y=1.3, feather=0)
+    session = ParsedFaceMask(parsing, fallback_mask=geometry, expansion=-20).create_session()
+    actual = full(session.build(analysis.frames[0], 64, 48)[0])
+    expected = full(geometry.build(FACE.box, 64, 48, landmarks=FACE.landmarks))
+    np.testing.assert_array_equal(actual, expected)
+    assert session.diagnostics == {0: "fallback_empty"}
+
+
+def test_per_face_overrides_keep_cache_binding_and_scope_strict_errors():
+    other = replace(FACE, track_id=1, box=Box(36, 6, 56, 26), landmarks=None)
+    frame = FrameAnalysis(0, (FACE, other))
+    analysis, parsing = cache((frame,), [(labels(), np.zeros((48, 64), np.uint8))])
+    strict = ParsedFaceMask(parsing, fallback="error", feather=0, expansion=2)
+    geometric = LandmarkFaceMask()
+    # The unusable parse for ID 1 must not fail a strict semantic config for ID 0.
+    mask = PerFaceMask(strict, {1: geometric})
+    mask.validate_analysis(analysis)
+    session = mask.create_session()
+    regions = session.build(frame, 64, 48)
+    assert full(regions[0])[10, 25] == 1
+    np.testing.assert_array_equal(full(regions[1]), full(geometric.build(other.box, 64, 48)))
+    assert session.diagnostics == {0: "parsed", 1: "geometry"}
+    with pytest.raises(ValueError, match="face analysis"):
+        mask.create_session().build(replace(frame, faces=(FACE,)), 64, 48)
+    with pytest.raises(ValueError, match="source and analysis"):
+        mask.validate_analysis(replace(analysis, source_sha256="1" * 64))
+    # An unused strict default has no authority over the geometric override.
+    all_geometry = PerFaceMask(strict, {0: geometric, 1: geometric})
+    assert all_geometry.create_session().build(frame, 64, 48).keys() == {0, 1}
+
+
+def test_semantic_per_track_parameters_and_sessions_are_independent():
+    other = replace(FACE, track_id=1, box=Box(36, 6, 56, 26), landmarks=None)
+    data = labels()
+    data[8:24, 38:54] = 1
+    frames = (FrameAnalysis(0, (FACE, other)), FrameAnalysis(1, (FACE, other)))
+    analysis, parsing = cache(frames, [(data, data), (data, data)])
+    mask = PerFaceMask(
+        ParsedFaceMask(parsing, feather=0), {1: ParsedFaceMask(parsing, feather=0, expansion=-2)}
+    )
+    a, b = mask.create_session(), mask.create_session()
+    regions = a.build(analysis.frames[0], 64, 48)
+    assert full(regions[0])[8, 10] == 1
+    assert full(regions[1])[8, 40] == 0
+    assert full(regions[1])[10, 40] == 1
+    a.build(analysis.frames[1], 64, 48)
+    again = b.build(analysis.frames[0], 64, 48)
+    np.testing.assert_array_equal(full(regions[1]), full(again[1]))
 
 
 def test_current_semantics_veto_previous_mask_after_temporal_filtering():
@@ -347,7 +454,8 @@ def test_parse_and_lossless_render_reuse_inference(video, detector, tmp_path):
     parsing = parse_video(source, analysis=analysis, parser=parser)
     assert parser.calls == 6 and detector.calls == 6
     parsing.save(tmp_path / "labels.npz")
-    mask = ParsedFaceMask(VideoParsing.load(tmp_path / "labels.npz"))
+    loaded = VideoParsing.load(tmp_path / "labels.npz")
+    mask = PerFaceMask(ParsedFaceMask(loaded), {0: ParsedFaceMask(loaded, expansion=2)})
     output = tmp_path / "rendered.avi"
     with pytest.warns(VideoExportWarning):
         render_video(source, output, analysis=analysis, effect=Pixelate(2), mask=mask, codec="FFV1")
@@ -404,9 +512,23 @@ def test_parse_and_render_cli(video, detector, tmp_path, monkeypatch):
                 str(parsing_path),
                 "--codec",
                 "FFV1",
+                "--expansion",
+                "2",
             ]
         )
     assert output.exists() and parser.calls == 6
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "render",
+                str(source),
+                str(analysis_path),
+                str(tmp_path / "invalid.avi"),
+                "--expansion",
+                "2",
+            ]
+        )
+    assert not (tmp_path / "invalid.avi").exists()
     with pytest.raises(SystemExit):
         main(["render", str(source), str(analysis_path), str(output), "--shape", "parsed"])
     with pytest.raises(SystemExit):
@@ -463,6 +585,13 @@ def test_render_rejects_different_track_analysis_before_export(video, detector, 
         {"included_labels": ("background",)},
         {"included_labels": ("skin",)},
         {"fallback": "empty"},
+        {"expansion": float("nan")},
+        {"expansion": float("inf")},
+        {"fallback_mask": None},
+        {"boundary_labels": ("skin",)},
+        {"boundary_labels": ("unknown",)},
+        {"boundary_labels": ("hair", "hair")},
+        {"boundary_labels": "hair"},
     ],
 )
 def test_mask_parameter_validation(kwargs):

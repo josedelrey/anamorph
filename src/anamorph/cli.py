@@ -84,6 +84,12 @@ def main(argv: list[str] | None = None) -> None:
     render.add_argument("--scale-y", type=float, default=None)
     render.add_argument("--offset-y", type=float, default=None)
     render.add_argument(
+        "--expansion",
+        type=float,
+        default=None,
+        help="Parsed core growth in source pixels, negative to shrink (default: 0)",
+    )
+    render.add_argument(
         "--feather",
         type=float,
         default=None,
@@ -172,10 +178,13 @@ def main(argv: list[str] | None = None) -> None:
                     feather=args.feather if args.feather is not None else 2,
                     stabilization=args.stabilization,
                     fallback=args.fallback,
+                    expansion=args.expansion if args.expansion is not None else 0,
                 )
             else:
                 if args.parsing is not None:
                     raise ValueError("--parsing requires --shape parsed")
+                if args.expansion is not None:
+                    raise ValueError("--expansion requires --shape parsed")
                 mask = (
                     LandmarkFaceMask(
                         **mask_options,

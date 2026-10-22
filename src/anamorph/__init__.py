@@ -19,6 +19,7 @@ from .masks import (
     MaskProvider,
     MaskRegion,
     MaskSession,
+    PerFaceMask,
 )
 from .models import download_face_parser_model, download_yunet_model
 from .parsed_masks import ParsedFaceMask, ParsedMaskSession
@@ -68,6 +69,7 @@ __all__ = [
     "MaskRegion",
     "MaskProvider",
     "MaskSession",
+    "PerFaceMask",
     "Pixelate",
     "ParsedFaceMask",
     "ParsedMaskSession",

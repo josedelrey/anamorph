@@ -290,8 +290,9 @@ output. It never downloads weights during construction or inference.
 The NPZ cache stores immutable label grids and JSON provenance, without pickle
 or RGB images. It is bound to the source bytes and the exact detection/track
 analysis. Retracking requires parsing again because it changes crop geometry.
-Changing `ParsedFaceMask.included_labels`, feathering, or stabilization reuses
-the same parsing. Extend the default `included_labels` tuple to add hair or ears.
+Changing `ParsedFaceMask.included_labels`, boundary edits, feathering, or
+stabilization reuses the same parsing. Extend the default `included_labels`
+tuple to add hair or ears.
 Full-face masks require all default facial classes to remain included. For
 other semantic selections, `FaceParsing.labels_at(x, y)` exposes full-frame labels.
 `save` refuses existing paths unless `overwrite=True`.
@@ -299,9 +300,10 @@ other semantic selections, `FaceParsing.labels_at(x, y)` exposes full-frame labe
 Each face has a separate temporal session. Connected components are selected
 using that face's landmarks, or box overlap when landmarks are absent, to avoid
 including a disconnected neighbor. Enclosed background holes are filled while
-explicitly excluded classes remain excluded. Accepted facial pixels are fully
-opaque. `feather` is measured in **full-frame pixels** and extends into predicted
-background only. Class exclusions are applied after temporal filtering, so
+explicitly excluded classes remain excluded by default. Accepted facial pixels
+are fully opaque before deliberate boundary edits. `feather` is measured in
+**full-frame pixels** and extends into predicted background by default.
+Class exclusions are applied after temporal filtering, so
 skin/hair edges may remain hard. Touching faces and incorrect predictions can
 still defeat component separation and boundary accuracy.
 
@@ -316,6 +318,48 @@ not a complete silhouette assessment. `mask.create_session().diagnostics`
 reports `parsed`, `held`, `fallback_empty`, `fallback_incomplete`, or
 `fallback_missing` after `build(frame_analysis, width, height)`. Held tracks
 reuse their previous accepted labels and remain stale without motion prediction.
+
+`expansion` grows or shrinks the opaque core by a signed distance in source
+pixels. Positive values grow into background while retaining predicted hair,
+ear, and neck exclusions. Negative values deliberately remove facial coverage,
+then apply the outward feather. Temporal history cannot undo deliberate shrinkage.
+Edits stop at the parsing crop boundary. Coverage checks run before these edits.
+The CLI exposes this control as `--expansion` with `--shape parsed`.
+
+For a known boundary error, `boundary_labels=("background", "neck")` permits
+growth and feathering a limited distance into predicted neck, without including
+the entire neck class. The default is `("background",)`. Adding `"hair"` or
+ears explicitly allows coverage on those classes near the selected contour.
+This trades semantic exclusion for coverage and needs visual review. It does
+not correct the underlying model. Disconnected facial components remain excluded.
+
+Use `PerFaceMask` to give selected cached track IDs different configurations:
+
+```python
+from dataclasses import replace
+from anamorph import LandmarkFaceMask, ParsedFaceMask, PerFaceMask
+
+base = ParsedFaceMask(parsing, expansion=1, feather=2)
+mask = PerFaceMask(
+    default=base,
+    overrides={
+        7: replace(base, expansion=3, feather=4),
+        12: replace(base, fallback_mask=LandmarkFaceMask(scale_y=1.3)),
+    },
+)
+# Pass mask to render_video, or inspect mask.create_session().build(...) first.
+```
+
+Choose IDs from your analysis. They are tracker IDs within that clip and can
+switch during crossings. Overrides are immutable and sessions isolate temporal
+state per configuration and track. Semantic providers validate the original
+frame before processing the selected IDs, so strict fallback errors apply only
+to faces using that configuration. Custom providers can optionally implement
+`build_selected(frame, width, height, track_ids)` on their sessions. Otherwise
+they receive and calculate the complete frame. No inference repeats when tuning
+mask settings. `fallback_mask` controls the instantaneous geometric shape,
+including scale, position, chin extension, and feathering. Its `stabilization`
+field is unused because fallback geometry is built independently per frame.
 
 Equivalent CLI commands and a comparison overlay:
 

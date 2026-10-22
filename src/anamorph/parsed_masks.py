@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import cv2
 import numpy as np
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_fill_holes, distance_transform_edt
 from scipy.optimize import linear_sum_assignment
 
 from .analysis import VideoAnalysis
@@ -34,17 +34,27 @@ _FACE_LABELS = (
 class ParsedFaceMask:
     """Use cached semantic boundaries, excluding hair, ears, and neck by default.
 
-    For accepted parses, all selected face pixels stay opaque. feather is an
+    With expansion=0, all selected face pixels stay opaque. feather is an
     OUTWARD distance in full-frame pixels, restricted to predicted background.
-    Excluded semantic classes remain zero after feathering and temporal filtering. Thus
-    skin/hair boundaries can be hard. Exclusions follow model predictions and
-    cannot guarantee the real anatomical boundary.
+    Excluded semantic classes remain zero after feathering and temporal filtering,
+    except classes explicitly allowed in boundary_labels. Thus skin/hair boundaries
+    can be hard by default. Exclusions follow model predictions and cannot guarantee
+    the real anatomical boundary.
 
     included_labels can change coverage without inference. fallback='geometry'
     uses an unsegmented geometric mask for unusable parses, prioritizing face
     coverage. These fallbacks can include hair and ears. fallback='error'
     refuses them. Inspect session.diagnostics to distinguish parsed, held,
     and fallback masks.
+
+    expansion is a signed full-frame pixel distance. Positive values grow the
+    opaque core into background. boundary_labels can explicitly permit a limited
+    margin into other classes, for example to correct a misplaced hairline. This
+    trades semantic exclusion for coverage. Negative expansion erodes the core,
+    deliberately reducing face coverage. Disconnected facial components veto growth.
+    Edits stop at the parsing crop edges. Quality checks run BEFORE edits, so
+    deliberate erosion cannot be mistaken for a parsing failure. fallback_mask
+    controls geometric fallbacks independently of accepted semantic masks.
     """
 
     parsing: VideoParsing
@@ -52,6 +62,9 @@ class ParsedFaceMask:
     stabilization: float = 0.65
     included_labels: tuple[str, ...] = _FACE_LABELS
     fallback: Literal["geometry", "error"] = "geometry"
+    expansion: float = 0
+    fallback_mask: LandmarkFaceMask = field(default_factory=LandmarkFaceMask)
+    boundary_labels: tuple[str, ...] = ("background",)
 
     def __post_init__(self) -> None:
         if not isinstance(self.parsing, VideoParsing):
@@ -62,6 +75,10 @@ class ParsedFaceMask:
             raise ValueError("stabilization must be in (0, 1]")
         if self.fallback not in ("geometry", "error"):
             raise ValueError("fallback must be geometry or error")
+        if not math.isfinite(self.expansion):
+            raise ValueError("expansion must be finite")
+        if not isinstance(self.fallback_mask, LandmarkFaceMask):
+            raise ValueError("fallback_mask must be a LandmarkFaceMask")
         if (
             not self.included_labels
             or isinstance(self.included_labels, str)
@@ -72,6 +89,14 @@ class ParsedFaceMask:
         if not set(_FACE_LABELS).issubset(self.included_labels):
             raise ValueError("Full-face masks must retain all default facial labels")
         object.__setattr__(self, "included_labels", tuple(self.included_labels))
+        if (
+            isinstance(self.boundary_labels, str)
+            or len(set(self.boundary_labels)) != len(self.boundary_labels)
+            or any(name not in FACE_PARSING_LABELS for name in self.boundary_labels)
+            or set(self.boundary_labels).intersection(self.included_labels)
+        ):
+            raise ValueError("boundary_labels must be unique class names outside included_labels")
+        object.__setattr__(self, "boundary_labels", tuple(self.boundary_labels))
 
     def validate_analysis(self, analysis: VideoAnalysis) -> None:
         self.parsing.validate_analysis(analysis)
@@ -155,6 +180,16 @@ def _warp_previous(region: MaskRegion, old_box: Box, new_box: Box, bounds: tuple
     return cv2.remap(region.alpha, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
 
+def _edit_core(core: np.ndarray, allowed: np.ndarray, expansion: float) -> np.ndarray:
+    if expansion > 0:
+        return (distance_transform_edt(~core) <= expansion) & allowed
+    if expansion < 0:
+        # The crop exterior is zero, including when the core touches every edge.
+        distance = distance_transform_edt(np.pad(core, 1))[1:-1, 1:-1]
+        return distance > -expansion
+    return core
+
+
 def _usable_core(core: np.ndarray, face: Face, bounds: tuple, width: int, height: int) -> bool:
     """Reject tiny patches and parses that leave visible measured features exposed."""
     visible = face.box.bounds(width, height)
@@ -221,9 +256,20 @@ class ParsedMaskSession:
         self.diagnostics: dict[int, str] = {}
         self._last_index = -1
         self._history: dict[int, tuple[Face, MaskRegion, FaceParsing]] = {}
-        self._fallback = LandmarkFaceMask()
+        self._fallback = mask.fallback_mask
 
     def build(self, frame: FrameAnalysis, width: int, height: int) -> dict[int, MaskRegion]:
+        return self._build(frame, width, height, None)
+
+    def build_selected(
+        self, frame: FrameAnalysis, width: int, height: int, track_ids: frozenset[int]
+    ) -> dict[int, MaskRegion]:
+        """Validate the original frame, then process only selected track IDs."""
+        return self._build(frame, width, height, track_ids)
+
+    def _build(
+        self, frame: FrameAnalysis, width: int, height: int, track_ids: frozenset[int] | None
+    ) -> dict[int, MaskRegion]:
         if frame.index <= self._last_index:
             raise ValueError("Frame indices must strictly increase in a mask session")
         parsed = {face.track_id: face for face in self.mask.parsing.for_frame(frame, width, height)}
@@ -233,6 +279,8 @@ class ParsedMaskSession:
         measurements = _measurements(frame)
         ids = tuple(FACE_PARSING_LABELS.index(name) for name in self.mask.included_labels)
         for face in frame.faces:
+            if track_ids is not None and face.track_id not in track_ids:
+                continue
             previous = self._history.get(face.track_id)
             if previous is not None and previous[0].box.iou(face.box) < 0.1:
                 previous = None
@@ -278,7 +326,10 @@ class ParsedMaskSession:
             # Close enclosed background holes such as unrecognized nostrils,
             # while preserving holes explicitly labelled hair, ears, or neck.
             core |= binary_fill_holes(core) & (labels == 0)
-            allowed = core | (labels == 0)
+            margin_ids = tuple(
+                FACE_PARSING_LABELS.index(name) for name in self.mask.boundary_labels
+            )
+            allowed = core | np.isin(labels, margin_ids)
             if not _usable_core(core, checked_face, bounds, width, height):
                 if self.mask.fallback == "error":
                     raise ValueError(
@@ -294,13 +345,17 @@ class ParsedMaskSession:
                 )
                 continue
             else:
+                core = _edit_core(core, allowed, self.mask.expansion)
                 alpha = core.astype(np.float32)
-                if self.mask.feather > 0:
+                if self.mask.feather > 0 and np.any(core):
                     distance = cv2.distanceTransform(
                         (~core).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
                     )
                     t = np.clip(distance / self.mask.feather, 0, 1)
                     alpha = 1 - t * t * (3 - 2 * t)
+                if self.mask.expansion < 0:
+                    # Deliberate shrinkage must not be undone by carried history.
+                    allowed &= alpha > 0
             if previous is not None:
                 old_face, old_region, _ = previous
                 prior = _warp_previous(old_region, old_face.box, face.box, bounds)
@@ -309,8 +364,8 @@ class ParsedMaskSession:
                     alpha = np.maximum(alpha, weight * alpha + (1 - weight) * prior)
                 else:
                     alpha = np.maximum(core, prior)
-            # Apply class exclusions LAST, so neither feathering nor past masks
-            # can bleed onto hair, ears, neck, or another disconnected face.
+            # Apply exclusions LAST. Only explicitly allowed boundary classes
+            # can receive margin coverage. Disconnected faces remain excluded.
             alpha[~allowed] = 0
             region = MaskRegion(bounds, alpha.astype(np.float32))
             regions[face.track_id] = region

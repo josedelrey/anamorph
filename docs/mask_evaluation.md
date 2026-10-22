@@ -15,6 +15,26 @@ inferring the entire video. The example warms temporal sessions from each
 cache's start. Missing tracks produce zero coverage, rather than disappearing
 from the report. Reuse the same annotations and caches for parameter comparisons.
 
+Use `--config local_inputs/mask_settings.json` to compare explicit configurations:
+
+```json
+{
+  "default": {"kind": "parsed", "expansion": 1, "feather": 2},
+  "overrides": {
+    "7": {"kind": "parsed", "expansion": 3, "feather": 4},
+    "12": {"kind": "face", "scale_y": 1.3}
+  }
+}
+```
+
+Each override is a complete configuration with constructor defaults for omitted
+parameters. It does not inherit omitted parameters from `default`. `kind` is
+`parsed` or `face`. Parsed settings accept a nested `fallback_mask` object with
+`LandmarkFaceMask` shape parameters, and `boundary_labels` for explicit boundary
+tolerance. The JSON adapter is local to this example. The primary library API
+is `PerFaceMask`, `ParsedFaceMask`, and `LandmarkFaceMask`. Reports record the
+configuration and implementation digests. They retain per-track diagnostics.
+
 Reference JSON has the following format. Replace the example digests with
 actual SHA-256 hashes. Coordinates describe full-frame continuous pixel edges.
 Polygons must be simple, with at least three vertices, and may be concave.

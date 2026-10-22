@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol
 
 import numpy as np
@@ -333,6 +335,103 @@ class MaskSession:
         self._history = history
         self._last_index = frame.index
         self._dimensions = (width, height)
+        return regions
+
+
+@dataclass(frozen=True)
+class PerFaceMask:
+    """Select a mask configuration by cached track ID, with a common default.
+
+    Overrides are copied and immutable. Each distinct configuration object owns
+    a fresh session. Providers receive the complete original frame, preserving
+    analysis/cache binding. Only the selected track's region is returned.
+    Sessions may implement build_selected to limit processing after validation,
+    as ParsedMaskSession does. Other providers calculate complete frames.
+    This replays mask calculations per configuration, never face inference.
+    Track IDs are local to an analysis and may switch during crossings.
+    """
+
+    default: FaceMask | LandmarkFaceMask | MaskProvider = field(default_factory=LandmarkFaceMask)
+    overrides: Mapping[int, FaceMask | LandmarkFaceMask | MaskProvider] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        copied = dict(self.overrides)
+        if any(type(track_id) is not int or track_id < 0 for track_id in copied):
+            raise ValueError("Mask override IDs must be nonnegative integers")
+        for mask in (self.default, *copied.values()):
+            if not isinstance(mask, (FaceMask, LandmarkFaceMask)) and not (
+                callable(getattr(mask, "create_session", None))
+                and callable(getattr(mask, "validate_analysis", None))
+            ):
+                raise ValueError("Each override and default must implement the mask contract")
+        object.__setattr__(self, "overrides", MappingProxyType(copied))
+
+    def validate_analysis(self, analysis: VideoAnalysis) -> None:
+        for mask in (self.default, *self.overrides.values()):
+            if not isinstance(mask, (FaceMask, LandmarkFaceMask)):
+                mask.validate_analysis(analysis)
+
+    def create_session(self) -> PerFaceMaskSession:
+        return PerFaceMaskSession(self)
+
+
+class PerFaceMaskSession:
+    """Independent configuration sessions with selected per-track diagnostics."""
+
+    def __init__(self, mask: PerFaceMask) -> None:
+        self.mask = mask
+        configs = {id(value): value for value in (mask.default, *mask.overrides.values())}
+        self._sessions = {
+            key: MaskSession(value)
+            if isinstance(value, (FaceMask, LandmarkFaceMask))
+            else value.create_session()
+            for key, value in configs.items()
+        }
+        self._last_index = -1
+        self.diagnostics: dict[int, str] = {}
+
+    def build(self, frame: FrameAnalysis, width: int, height: int) -> dict[int, MaskRegion]:
+        return self._build(frame, width, height, None)
+
+    def build_selected(
+        self, frame: FrameAnalysis, width: int, height: int, track_ids: frozenset[int]
+    ) -> dict[int, MaskRegion]:
+        return self._build(frame, width, height, track_ids)
+
+    def _build(
+        self, frame: FrameAnalysis, width: int, height: int, track_ids: frozenset[int] | None
+    ) -> dict[int, MaskRegion]:
+        if frame.index <= self._last_index:
+            raise ValueError("Frame indices must strictly increase in a mask session")
+        chosen = {
+            face.track_id: id(self.mask.overrides.get(face.track_id, self.mask.default))
+            for face in frame.faces
+            if track_ids is None or face.track_id in track_ids
+        }
+        candidates = {}
+        for key, session in self._sessions.items():
+            selected = frozenset(t for t, config in chosen.items() if config == key)
+            candidates[key] = (
+                session.build_selected(frame, width, height, selected)
+                if hasattr(session, "build_selected")
+                else session.build(frame, width, height)
+            )
+        regions, diagnostics = {}, {}
+        for face in frame.faces:
+            if face.track_id not in chosen:
+                continue
+            selected = self.mask.overrides.get(face.track_id, self.mask.default)
+            key = id(selected)
+            if face.track_id in candidates[key]:
+                regions[face.track_id] = candidates[key][face.track_id]
+            status = "legacy" if isinstance(selected, FaceMask) else "geometry"
+            diagnostics[face.track_id] = getattr(self._sessions[key], "diagnostics", {}).get(
+                face.track_id, status
+            )
+        self.diagnostics = diagnostics
+        self._last_index = frame.index
         return regions
 
 

@@ -231,6 +231,26 @@ only. Arbitrary sequence algorithms do not fit a streaming unary operator.
 
 ## Backend and reproducibility
 
+Mask configuration can be selected by cached track ID using `PerFaceMask`.
+Each configuration object owns a separate session. Complete original frames
+are preserved for cache validation. Sessions with `build_selected` can scope
+processing after validation, which prevents strict semantic fallback errors
+from unrelated faces. Other custom providers calculate complete frames and the
+wrapper selects their output regions. Configuration changes do not repeat
+inference. Track IDs remain subject to association errors.
+
+Semantic core editing uses signed source-pixel distances, followed by outward
+feathering and temporal filtering. The final class veto retains exclusions,
+apart from explicitly allowed `boundary_labels`. Negative expansion clips
+history to the edited mask's feather support. Quality gates inspect the raw
+semantic core before deliberate edits. Geometric fallback shape has its own
+configuration and remains an instantaneous estimate.
+
+`anamorph.evaluation` measures masks against reference polygons independently
+of model labels. The replayable evaluation example binds annotations to video,
+decoded frame, and analysis hashes, and records per-face fallback status. The
+reference format and metric limitations are in [mask evaluation](mask_evaluation.md).
+
 OpenCV headless supplies CPU image operations, bundled detection, and common
 codecs without a GUI dependency. NumPy supplies inspectable arrays. SciPy
 supplies tested global assignment and a foundation for later signal and
