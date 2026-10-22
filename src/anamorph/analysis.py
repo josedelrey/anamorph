@@ -80,12 +80,19 @@ class VideoAnalysis:
         if any(frame.detections is None and frame.index % interval == 0 for frame in self.frames):
             raise ValueError("Raw detections are unavailable for retracking")
         tracker.reset()
-        frames = tuple(
-            replace(frame, faces=tracker.update(list(frame.detections or ())))
-            for frame in self.frames
-        )
+        frames = []
+        cuts = self.provenance.get("scene_cuts", [])
+        for frame in self.frames:
+            if frame.index in cuts:
+                tracker.clear()
+            frames.append(replace(frame, faces=tracker.update(list(frame.detections or ()))))
+        provenance = {
+            key: value
+            for key, value in self.provenance.items()
+            if key not in ("motion", "motion_diagnostics")
+        }
         return replace(
-            self, frames=frames, provenance=self.provenance | {"tracker": tracker.metadata()}
+            self, frames=tuple(frames), provenance=provenance | {"tracker": tracker.metadata()}
         )
 
     @classmethod

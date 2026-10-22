@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import tempfile
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from .compositing import FrameRenderer
 from .detection import FaceDetector, HaarFaceDetector
 from .effects import Effect
 from .masks import FaceMask, LandmarkFaceMask, MaskProvider
+from .motion import SparseOpticalFlow
 from .tracking import IoUTracker
 from .types import FrameAnalysis, Image
 
@@ -78,46 +81,141 @@ def analyze_video(
     detector: FaceDetector | None = None,
     tracker: IoUTracker | None = None,
     detection_interval: int = 1,
+    motion: SparseOpticalFlow | None = None,
 ) -> VideoAnalysis:
     """Decode once, detect, associate faces, and return reusable geometry.
 
-    detection_interval is measured in decoded frames. Held boxes remain static
-    during skipped or missed detections. The supplied tracker is reset on entry.
+    detection_interval is measured in decoded frames. Optional motion predicts
+    existing boxes between observations. Otherwise held boxes remain static.
+    The supplied tracker is reset on entry.
     Source bytes must remain unchanged throughout analysis and future renders.
     """
+    return _analyze_video(
+        source,
+        detector=detector if detector is not None else HaarFaceDetector(),
+        tracker=tracker if tracker is not None else IoUTracker(),
+        detection_interval=detection_interval,
+        motion=motion,
+    )
+
+
+def track_video(
+    source: str | Path,
+    *,
+    analysis: VideoAnalysis,
+    motion: SparseOpticalFlow,
+    tracker: IoUTracker | None = None,
+) -> VideoAnalysis:
+    """Replay cached raw detections with image-derived motion, without inference.
+
+    Decodes the source again. The returned geometry has a different analysis
+    digest, so semantic parsing must be recomputed for its new crop positions.
+    Use VideoAnalysis.retrack for box-only experiments without video decoding.
+    """
+    if not isinstance(motion, SparseOpticalFlow):
+        raise ValueError("motion must be a SparseOpticalFlow instance")
+    interval = analysis.provenance.get("detection_interval", 1)
+    if type(interval) is not int or interval < 1:
+        raise ValueError("Invalid cached detection interval")
+    if any(f.detections is None and f.index % interval == 0 for f in analysis.frames):
+        raise ValueError("Raw detections are unavailable for motion replay")
+    return _analyze_video(
+        source,
+        detector=None,
+        tracker=tracker if tracker is not None else IoUTracker(),
+        detection_interval=interval,
+        motion=motion,
+        cached=analysis,
+    )
+
+
+def _analyze_video(
+    source: str | Path,
+    *,
+    detector: FaceDetector | None,
+    tracker: IoUTracker,
+    detection_interval: int,
+    motion: SparseOpticalFlow | None = None,
+    cached: VideoAnalysis | None = None,
+) -> VideoAnalysis:
     if type(detection_interval) is not int or detection_interval < 1:
         raise ValueError("detection_interval must be a positive integer")
-    detector = detector if detector is not None else HaarFaceDetector()
-    tracker = tracker if tracker is not None else IoUTracker()
+    if motion is not None and not isinstance(motion, SparseOpticalFlow):
+        raise ValueError("motion must be a SparseOpticalFlow instance")
     if tracker.max_missing < detection_interval - 1:
         raise ValueError("max_missing must cover detection_interval - 1 skipped frames")
     source_hash = file_sha256(source)
+    if cached is not None and cached.source_sha256 != source_hash:
+        raise VideoError("Cached analysis source SHA-256 does not match this video")
     tracker.reset()
-    records = []
+    records, diagnostics, cuts = [], [], []
+    previous, faces = None, ()
     with _reader(source) as (capture, info):
+        if cached is not None and info != cached.video:
+            raise VideoError("Video metadata differs from cached analysis")
         for index, image in enumerate(_frames(capture, info)):
-            detections = detector.detect(image) if index % detection_interval == 0 else None
+            predictions = {}
+            scene_cut = False
+            if motion is not None and previous is not None:
+                estimate = motion.estimate(previous, image, faces)
+                predictions, scene_cut = estimate.predictions, estimate.scene_cut
+                if faces or scene_cut:
+                    diagnostics.append(
+                        {
+                            "frame": index,
+                            "tracks": {str(k): v for k, v in estimate.diagnostics.items()},
+                        }
+                    )
+                if scene_cut:
+                    cuts.append(index)
+                    tracker.clear()
+            if cached is not None:
+                if index >= len(cached.frames):
+                    raise VideoError("Video contains more frames than cached analysis")
+                detections = cached.frames[index].detections
+            else:
+                detections = (
+                    detector.detect(image) if scene_cut or index % detection_interval == 0 else None
+                )
+            faces = tracker.update(list(detections or ()), predictions=predictions)
             records.append(
                 FrameAnalysis(
                     index,
-                    tracker.update(detections or []),
+                    faces,
                     None if detections is None else tuple(detections),
                 )
             )
+            previous = image if motion is not None else None
     if not records:
         raise VideoError("Video contains no decodable frames")
     if file_sha256(source) != source_hash:
         raise VideoError("Source changed during analysis")
+    if cached is not None and len(records) != len(cached.frames):
+        raise VideoError("Video contains fewer frames than cached analysis")
+    provenance = {} if cached is None else dict(cached.provenance)
+    for key in ("motion", "motion_diagnostics", "scene_cuts", "parent_analysis_sha256"):
+        provenance.pop(key, None)
+    if cached is not None:
+        provenance["parent_analysis_sha256"] = hashlib.sha256(
+            json.dumps(
+                asdict(cached), sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode()
+        ).hexdigest()
+    if motion is not None:
+        provenance.update(motion=motion.metadata(), motion_diagnostics=diagnostics, scene_cuts=cuts)
     return VideoAnalysis(
         source_hash,
         info,
         tuple(records),
-        {
+        provenance
+        | {
             "anamorph": version("anamorph"),
             "opencv": cv2.__version__,
             "numpy": np.__version__,
             "scipy": version("scipy"),
-            "detector": detector.metadata(),
+            "detector": detector.metadata()
+            if cached is None
+            else cached.provenance.get("detector"),
             "tracker": tracker.metadata(),
             "detection_interval": detection_interval,
             "timing": "constant_frame_rate",
@@ -229,12 +327,17 @@ def process_video(
     detector: FaceDetector | None = None,
     tracker: IoUTracker | None = None,
     detection_interval: int = 1,
+    motion: SparseOpticalFlow | None = None,
     codec: str = "mp4v",
     overwrite: bool = False,
 ) -> RenderReport:
     """Convenience two-pass analysis and rendering. Use separate calls for reuse."""
     analysis = analyze_video(
-        source, detector=detector, tracker=tracker, detection_interval=detection_interval
+        source,
+        detector=detector,
+        tracker=tracker,
+        detection_interval=detection_interval,
+        motion=motion,
     )
     return render_video(
         source,

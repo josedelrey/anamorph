@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,9 +25,10 @@ class IoUTracker:
 
     max_missing counts decoded frames, including skipped inference frames.
     smoothing is the weight of the current observation (1 disables smoothing).
-    No motion prediction, face recognition, or identity guarantee is implied.
+    External image-derived box predictions can be supplied explicitly. The
+    tracker itself estimates no motion or recognition embedding.
     Landmarks are mapped from the latest measured box into the smoothed box.
-    Held tracks retain both box and landmarks unchanged during missing frames.
+    Without predictions, held tracks retain both box and landmarks unchanged.
     """
 
     def __init__(
@@ -42,8 +44,12 @@ class IoUTracker:
         self.reset()
 
     def reset(self) -> None:
-        self._tracks: dict[int, _Track] = {}
         self._next_id = 0
+        self.clear()
+
+    def clear(self) -> None:
+        """Forget active tracks while preserving unused IDs, for example on a cut."""
+        self._tracks: dict[int, _Track] = {}
 
     def metadata(self) -> dict:
         return {
@@ -53,7 +59,26 @@ class IoUTracker:
             "smoothing": self.smoothing,
         }
 
-    def update(self, detections: list[Detection]) -> tuple[Face, ...]:
+    def update(
+        self, detections: list[Detection], *, predictions: Mapping[int, Box] | None = None
+    ) -> tuple[Face, ...]:
+        """Associate from optional externally predicted boxes for existing IDs.
+
+        Predictions are image-derived estimates, not detector observations.
+        They do not reset missing age. Smoothing blends predictions with new
+        observations, avoiding added box lag when motion is accurate.
+        """
+        predictions = predictions or {}
+        if any(
+            type(key) is not int or key not in self._tracks or not isinstance(box, Box)
+            for key, box in predictions.items()
+        ):
+            raise ValueError("Predictions must map existing integer track IDs to Box values")
+        for track_id, box in predictions.items():
+            track = self._tracks[track_id]
+            if track.landmarks is not None:
+                track.landmarks = track.landmarks.remap(track.box, box)
+            track.box = box
         detections = sorted(detections, key=lambda d: d.box.as_tuple())
         ids = sorted(self._tracks)
         matched: dict[int, int] = {}

@@ -147,7 +147,7 @@ CLI the corresponding options are `--score-threshold 0.7 --max-size native`.
 Raw `Detection.landmarks` contain measured points. `Face.landmarks` map those
 points into the track's smoothed box while preserving their box-relative
 positions. Missing detections hold both box and points, with `observed=False`.
-These held points are stale estimates. Landmark shape is not independently
+Without optional motion, these held points are stale estimates. Landmark shape is not independently
 smoothed. Effects can access `context.face.landmarks` and subtract the crop
 origin in `context.crop_bounds` to obtain crop-local coordinates.
 
@@ -233,9 +233,59 @@ uv run python examples/evaluate_mask_coverage.py outputs/analysis.json local_inp
 
 `IoUTracker` uses global one-to-one box association and optional exponential
 box smoothing. IDs persist through brief missed detections using static held
-boxes. `max_missing` counts decoded frames, including skipped inference frames.
+boxes by default. `max_missing` counts decoded frames, including skipped inference frames.
 It must be at least `detection_interval - 1`. A frame record exposes `observed`
 and `missing_frames` for each face. IDs restart for each video.
+
+### Motion through short detection gaps
+
+`SparseOpticalFlow` optionally predicts existing boxes from face-interior image
+features before association. It checks forward/backward tracking agreement,
+photometric error, inlier fraction, spatial support, and maximum displacement.
+Only translation is estimated. Predictions do not count as detections or reset
+the missing age. They are bounded to three consecutive missing frames by default.
+Rejected estimates use the normal tracker hold/expiry policy.
+
+```python
+from anamorph import SparseOpticalFlow, analyze_video, track_video
+
+analysis = analyze_video(
+    "local_inputs/clip.mp4",
+    detector=detector,
+    motion=SparseOpticalFlow(),
+)
+# Alternatively, reuse raw detections from an existing VideoAnalysis.
+refined = track_video(
+    "local_inputs/clip.mp4",
+    analysis=analysis,
+    motion=SparseOpticalFlow(),
+)
+```
+
+`track_video` decodes images but performs no detection inference. The new
+analysis has different tracked geometry, so parse it again before using semantic
+masks. Mask and effect changes can then reuse that new parsing normally.
+`analysis.retrack(...)` remains the faster box-only option and drops motion
+diagnostics because it does not replay images. Detected scene-cut boundaries
+are retained. A coarse RGB-change heuristic clears tracks on detected cuts,
+preserving unused IDs, and forces detection when analyzing fresh footage.
+During cached replay, it uses only available cached observations. The heuristic
+can miss cuts or mistake lighting changes for cuts.
+
+Motion settings, per-frame acceptance/rejection reasons, and cut indices are
+saved in analysis provenance. A successful motion estimate is not an identity
+or occlusion guarantee. Optical flow cannot discover a face that was never
+detected, reliably follow complete occlusion, or solve crossings.
+
+```bash
+uv run python examples/compare_tracking.py local_inputs/clip.mp4 outputs/analysis.json outputs/tracking_review
+```
+
+The example writes static/flow analyses and a verified mask comparison preview.
+Use `--detection-interval 3` for an explicit experiment skipping cached observations.
+With normalized box annotations, `--annotations local_inputs/boxes.jsonl` reports
+one-to-one box matching, adjacent ID switches, and consecutive miss runs.
+Unannotated detection counts are diagnostics. Preview faces remain visible.
 
 ### Semantic face boundaries
 
@@ -460,7 +510,8 @@ annotations separate from model predictions and report their provenance.
   full-face coverage. Optional semantic masks exclude predicted hair and ears,
   but small, dim, or occluded faces can require geometric fallbacks. Exact
   anatomical exclusion and independent silhouette accuracy are not guaranteed.
-  Optical flow and motion compensation are not implemented.
+  Optional sparse optical flow handles bounded translation through short gaps.
+  It can reject low-texture or occluded faces and cannot recover unseen faces.
 - Temporal blending resizes the previous crop into current crop coordinates.
   It can create ghosting and is not a tracking improvement.
 - Video export requires even dimensions and an available codec/container pair.

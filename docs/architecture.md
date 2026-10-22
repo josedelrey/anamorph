@@ -170,25 +170,42 @@ operation, because different landmark schemes need not describe the same points.
 maximize valid match count and summed IoU. Gating precedes assignment so invalid
 edges cannot steal valid matches. New IDs follow sorted detection coordinates.
 The current observation has weight `smoothing` in the updated box. Unmatched
-tracks retain their last box for at most `max_missing` decoded frames.
+tracks retain their last box for at most `max_missing` decoded frames unless
+external motion predictions move that box.
 Reacquired tracks keep their IDs and expired IDs are never reused in a clip.
 `observed=False` distinguishes held boxes from measurements.
 
 Raw detections preserve their measured landmarks. Each tracked observation
 maps those points affinely from its measurement box into the smoothed track
 box, preserving box-relative geometry. Held tracks keep both box and points
-unchanged and report their missing-frame age. A new observation without
-landmarks clears old points. There is no independent temporal landmark filter
-or optical-flow prediction. This keeps tracking geometry consistent while
+unchanged by default and report their missing-frame age. Optional image-derived
+box predictions remap held landmarks without changing observation age. A new
+observation without landmarks clears old points. There is no independent
+temporal landmark filter. This keeps tracking geometry consistent while
 allowing the original measurements to be inspected and retracked from cache.
 Effects receive tracked landmarks through `EffectContext.face`. Subtracting
 the crop bounds' `(x1, y1)` converts a full-frame point to crop-local pixels.
 
 Track IDs are local associations within a clip, not biometric identities.
-There is no motion prediction, recognition embedding, scene-cut detection, or
-backward interpolation. Larger detection intervals increase the risk of
+There is no recognition embedding or backward interpolation. Larger detection intervals increase the risk of
 uncovered movement and late entries. These tradeoffs remain explicit in the
 analysis records.
+
+Optional `SparseOpticalFlow` estimates median translation from interior
+Shi-Tomasi corners using pyramidal Lucas-Kanade flow in both directions.
+Forward/backward disagreement, photometric error, insufficient inliers or
+spatial support, excessive displacement, and long observation gaps reject an
+estimate. Existing track boxes are predicted before global association and
+smoothing. No detections or identities are invented by motion estimation.
+The coarse RGB scene-change guard clears active tracks while retaining unused
+IDs. It is a heuristic, including possible missed cuts and false alarms.
+
+`track_video` replays existing raw detections while decoding the source for
+motion. Settings, per-frame status, cuts, and the parent analysis digest enter
+provenance. New tracked geometry invalidates old parsing caches. Box-only
+`retrack` strips motion diagnostics and respects recorded cuts. Analysis schema
+2 remains unchanged because predictions use existing box/landmark fields and
+the additional diagnostics are JSON provenance. No frames enter the cache.
 
 ## Effects and extension points
 
@@ -278,6 +295,7 @@ alongside analysis JSON for reproducibility.
 
 - [OpenCV cascade classification](https://docs.opencv.org/4.x/db/d28/tutorial_cascade_classifier.html)
 - [OpenCV YuNet API and point layout](https://docs.opencv.org/4.x/df/d20/classcv_1_1FaceDetectorYN.html)
+- [OpenCV optical flow](https://docs.opencv.org/4.x/d4/dee/tutorial_optical_flow.html)
 - [OpenCV Zoo YuNet model and license](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)
 - [BiSeNet parser, preprocessing, and model releases](https://github.com/yakhyo/face-parsing)
 - [CelebAMask-HQ labels and dataset agreement](https://github.com/switchablenorms/CelebAMask-HQ)

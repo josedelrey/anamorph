@@ -22,6 +22,7 @@ from .masks import (
     PerFaceMask,
 )
 from .models import download_face_parser_model, download_yunet_model
+from .motion import MotionEstimate, SparseOpticalFlow
 from .parsed_masks import ParsedFaceMask, ParsedMaskSession
 from .parsing import (
     FACE_PARSING_LABELS,
@@ -40,6 +41,7 @@ from .video import (
     analyze_video,
     process_video,
     render_video,
+    track_video,
 )
 
 __all__ = [
@@ -69,12 +71,14 @@ __all__ = [
     "MaskRegion",
     "MaskProvider",
     "MaskSession",
+    "MotionEstimate",
     "PerFaceMask",
     "Pixelate",
     "ParsedFaceMask",
     "ParsedMaskSession",
     "RenderReport",
     "SpatialEffect",
+    "SparseOpticalFlow",
     "TemporalBlend",
     "VideoAnalysis",
     "VideoError",
@@ -89,4 +93,5 @@ __all__ = [
     "parse_video",
     "process_video",
     "render_video",
+    "track_video",
 ]
