@@ -1,0 +1,93 @@
+# Evaluating masks against reference outlines
+
+Use local reference outlines to evaluate coverage before selecting effects.
+Keep dataset images and their derived annotations under ignored `local_inputs/`.
+Keep reports and review images under ignored `outputs/`. Input dataset terms
+still apply. Anamorph's license does not license the footage.
+
+```bash
+uv run python examples/evaluate_masks.py local_inputs/clip.mp4 outputs/analysis.json local_inputs/references.json outputs/mask_review --parsing outputs/parsing.npz
+```
+
+Omit `--parsing` to evaluate the default geometric mask. Supply multiple
+non-overlapping partial parsing caches to evaluate selected intervals without
+inferring the entire video. The example warms temporal sessions from each
+cache's start. Missing tracks produce zero coverage, rather than disappearing
+from the report. Reuse the same annotations and caches for parameter comparisons.
+
+Reference JSON has the following format. Replace the example digests with
+actual SHA-256 hashes. Coordinates describe full-frame continuous pixel edges.
+Polygons must be simple, with at least three vertices, and may be concave.
+The polygon list represents a union, which supports separated visible regions.
+
+```json
+{
+  "schema_version": 1,
+  "source_sha256": "hash of the original video bytes",
+  "analysis_sha256": "hash of the analysis JSON bytes",
+  "width": 640,
+  "height": 480,
+  "annotation_provenance": "Who traced these outlines, how, and with what review",
+  "frames": [{
+    "index": 10,
+    "rgb_sha256": "hash of decoded uint8 RGB frame bytes in row-major order",
+    "faces": [{
+      "reference_id": "person_a",
+      "track_id": 0,
+      "tags": ["closeup", "frontal"],
+      "face": [[[100, 80], [200, 80], [210, 200], [110, 210]]],
+      "excluded": {
+        "hair": [[[100, 30], [200, 30], [200, 75], [100, 75]]],
+        "ears": [[[85, 110], [95, 110], [95, 150], [85, 150]]]
+      },
+      "ignore": [],
+      "uncertainty_pixels": 2
+    }]
+  }]
+}
+```
+
+Trace visible facial tissue including eyebrows, eyes, glasses, lips, and chin,
+excluding hair, ears, neck, and occluders. Do not infer hidden anatomy. Use
+`ignore` polygons for ambiguous regions. `uncertainty_pixels` ignores an area
+around the traced facial boundary in area measurements. Explicit excluded
+regions cannot overlap evaluable facial tissue. For reproducible per-person
+evaluation, assign the corresponding cached `track_id`, or `null` for a missed
+face. Keep `reference_id` stable across frames even if the tracker changes IDs.
+The analysis digest prevents silently reusing assignments after retracking.
+
+Trace images without mask overlays, then review the reference overlay and
+correct obvious mistakes before comparing predictions. Record whether the
+annotator is a human or an AI agent, annotation uncertainty, dataset selection,
+and the extent of independent review. AI-traced development annotations are
+not independent human ground truth. Do not claim generalization from footage
+used to tune masks. A readiness decision needs held-out, independently reviewed
+examples of the conditions the library is expected to handle.
+
+## Measurements
+
+`anamorph.evaluation` exposes `polygon_mask`, `evaluate_mask`, and
+`temporal_error_change` for direct array-based experiments. No inference runs.
+
+- **Missed opaque face fraction** counts evaluable facial pixels with alpha
+  below 0.999. **Mean face alpha deficit** measures the average of `1 - alpha`.
+- **Opaque IoU** compares the opaque mask with the reference silhouette.
+  **Extra alpha pixels** sums alpha outside the reference, ignoring uncertainty.
+- **Exclusion coverage** reports mean alpha and opaque coverage separately for
+  each manually annotated hair/ear region. Predicted model labels are not used
+  as their own correctness reference.
+- **Boundary p95** is the 95th percentile of pooled, bidirectional distances
+  between opaque and reference boundary pixels. Units are source pixels. Raw
+  outlines include uncertain borders. Empty predictions yield `null`, alongside
+  complete missed coverage. They are never reported as zero boundary error.
+- **Temporal error change** compares signed mask errors in adjacent frames of
+  the same reference identity, after aligning reference bounding boxes. This
+  removes ideal box translation and scaling, while still responding to pose
+  changes and annotation noise. It is a flicker proxy, not a perceptual score.
+  Sparse non-adjacent frames do not produce temporal measurements.
+
+Reports retain per-face results, tags, parsing/fallback status, and file hashes.
+The overall missed-face rate is weighted by annotated facial area. Inspect
+per-face and condition-specific failures because a large close-up can dominate
+that average. A small development set cannot establish anonymity or exhaustive
+detection accuracy. Unannotated faces do not contribute to these measurements.

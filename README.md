@@ -400,6 +400,13 @@ measure real-world detector recall, tracking accuracy, or re-identification
 resistance. Those require representative, appropriately licensed footage and
 an evaluation protocol.
 
+For silhouette evaluation, [the mask evaluation guide](docs/mask_evaluation.md)
+defines local polygon annotations, explicit hair/ear exclusions, uncertain
+boundaries, area and boundary measurements, and a temporal flicker proxy.
+`examples/evaluate_masks.py` replays cached masks against those references
+without inference and writes per-face reports and review images. Keep
+annotations separate from model predictions and report their provenance.
+
 ## Current scope and next steps
 
 - The bundled detector targets frontal faces. Profiles, occlusion, small faces,
