@@ -137,6 +137,7 @@ def temporal_error_change(
     *,
     previous_ignore: np.ndarray | None = None,
     ignore: np.ndarray | None = None,
+    context: float = 0.25,
 ) -> float | None:
     """Mean change in signed mask error after reference-box motion alignment.
 
@@ -144,9 +145,13 @@ def temporal_error_change(
     alignment uses reference bounds, never tracker predictions. The measurement
     is a flicker proxy, affected by pose changes and annotation noise. It does
     not establish perceptual temporal stability or optical-flow accuracy.
+    context pads reference bounds by a fraction of their width/height,
+    including outward boundary flicker.
     """
     old, old_ref, old_valid = _arrays(previous_alpha, previous_reference, previous_ignore)
     current, ref, valid = _arrays(alpha, reference, ignore)
+    if not np.isfinite(context) or not 0 <= context <= 1:
+        raise ValueError("context must be in [0, 1]")
     if old.shape != current.shape:
         raise ValueError("Temporal measurements require equal frame dimensions")
     if not np.any(old_ref) or not np.any(ref):
@@ -154,15 +159,19 @@ def temporal_error_change(
     oy, ox = np.nonzero(old_ref)
     y, x = np.nonzero(ref)
     a, b, c, d = x.min(), y.min(), x.max() + 1, y.max() + 1
-    px = (np.arange(a, c) + 0.5 - a) * (np.ptp(ox) + 1) / (c - a) + ox.min() - 0.5
-    py = (np.arange(b, d) + 0.5 - b) * (np.ptp(oy) + 1) / (d - b) + oy.min() - 0.5
+    left = max(0, int(np.floor(a - context * (c - a))))
+    right = min(ref.shape[1], int(np.ceil(c + context * (c - a))))
+    top = max(0, int(np.floor(b - context * (d - b))))
+    bottom = min(ref.shape[0], int(np.ceil(d + context * (d - b))))
+    px = (np.arange(left, right) + 0.5 - a) * (np.ptp(ox) + 1) / (c - a) + ox.min() - 0.5
+    py = (np.arange(top, bottom) + 0.5 - b) * (np.ptp(oy) + 1) / (d - b) + oy.min() - 0.5
     mx, my = (v.astype(np.float32) for v in np.meshgrid(px, py))
     old_error = old.astype(np.float32) - old_ref
     warped = cv2.remap(old_error, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
     known = cv2.remap(old_valid.astype(np.float32), mx, my, cv2.INTER_LINEAR) >= 0.999
-    selected = known & valid[b:d, a:c]
+    selected = known & valid[top:bottom, left:right]
     return (
-        float(np.mean(np.abs(warped[selected] - (current - ref)[b:d, a:c][selected])))
+        float(np.mean(np.abs(warped[selected] - (current - ref)[top:bottom, left:right][selected])))
         if np.any(selected)
         else None
     )

@@ -103,7 +103,11 @@ examples of the conditions the library is expected to handle.
 - **Temporal error change** compares signed mask errors in adjacent frames of
   the same reference identity, after aligning reference bounding boxes. This
   removes ideal box translation and scaling, while still responding to pose
-  changes and annotation noise. It is a flicker proxy, not a perceptual score.
+  changes and annotation noise. A context region extends 25 percent of the
+  reference width/height beyond each side to capture outward boundary flicker.
+  Unknown pixels outside either frame or in ignored regions do not contribute.
+  `context` configures this fraction in the Python measurement function.
+  It is a flicker proxy, not a perceptual score.
   Sparse non-adjacent frames do not produce temporal measurements.
 
 Reports retain per-face results, tags, parsing/fallback status, and file hashes.

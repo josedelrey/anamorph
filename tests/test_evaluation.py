@@ -98,7 +98,29 @@ def test_reference_translation_does_not_count_as_flicker():
     b[3:7, 5] = 0
     assert temporal_error_change(a, old, b, new) == 0
     b[3:7, 5] = 1
-    assert temporal_error_change(a, old, b, new) == 0.25
+    assert temporal_error_change(a, old, b, new) == pytest.approx(4 / 36)
+    assert temporal_error_change(a, old, b, new, context=0) == 0.25
+
+
+def test_outward_boundary_flicker_is_counted_in_reference_context():
+    ref = rectangle()
+    before = ref.astype(float)
+    after = before.copy()
+    after[1, 2:6] = 1
+    assert temporal_error_change(before, ref, after, ref) == pytest.approx(4 / 36)
+    assert temporal_error_change(before, ref, after, ref, context=0) == 0
+
+
+def test_temporal_context_excludes_out_of_frame_samples():
+    old_ref = rectangle(0, 0, 4, 4)
+    new_ref = rectangle(3, 2, 7, 6)
+    assert (
+        temporal_error_change(old_ref.astype(float), old_ref, new_ref.astype(float), new_ref) == 0
+    )
+    with pytest.raises(ValueError, match="context"):
+        temporal_error_change(
+            old_ref.astype(float), old_ref, new_ref.astype(float), new_ref, context=float("nan")
+        )
 
 
 def test_temporal_invalid_shapes_and_ignored_pairs():

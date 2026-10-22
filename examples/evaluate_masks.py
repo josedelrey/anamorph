@@ -222,6 +222,8 @@ def main():
         "parsing_sha256": [file_sha256(p) for p in args.parsing],
         "opencv": cv2.__version__,
         "numpy": np.__version__,
+        "evaluation_implementation_sha256": file_sha256(inspect.getfile(evaluate_mask)),
+        "metric_parameters": {"opaque_threshold": 0.999, "temporal_context": 0.25},
         "mask_implementation_sha256": {
             cls.__name__: file_sha256(inspect.getfile(cls))
             for cls in (LandmarkFaceMask, ParsedFaceMask, PerFaceMask)
