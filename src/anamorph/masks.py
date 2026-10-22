@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol
 
+import cv2
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from .types import Alpha, Box, FrameAnalysis, Landmarks
 
@@ -118,6 +120,10 @@ class LandmarkFaceMask:
     stabilization is the current observation weight in a box-relative EMA.
     One disables filtering. A MaskSession owns temporal state, never this object.
     chin_extension lengthens the lower radius by a fraction in [0, 1].
+    protect_features adds a small convex feature hull when trusted landmarks
+    protrude beyond the opaque geometry, such as a profile nose outside its
+    detector box. This applies to build and MaskSession. geometry, rasterize,
+    and alpha_at describe only the underlying analytic shape.
     """
 
     scale_x: float = 1.12
@@ -126,6 +132,7 @@ class LandmarkFaceMask:
     feather: float = 0.08
     stabilization: float = 0.65
     chin_extension: float = 0.10
+    protect_features: bool = True
 
     def __post_init__(self) -> None:
         values = (
@@ -144,6 +151,8 @@ class LandmarkFaceMask:
             raise ValueError("stabilization must be in (0, 1]")
         if not 0 <= self.chin_extension <= 1:
             raise ValueError("chin_extension must be in [0, 1]")
+        if type(self.protect_features) is not bool:
+            raise ValueError("protect_features must be boolean")
 
     def geometry(self, box: Box, landmarks: Landmarks | None = None) -> FaceMaskGeometry:
         """Estimate geometry, falling back to an upright box for implausible points.
@@ -259,7 +268,59 @@ class LandmarkFaceMask:
         self, box: Box, width: int, height: int, *, landmarks: Landmarks | None = None
     ) -> MaskRegion | None:
         """Build one independent mask, without temporal filtering."""
-        return self.rasterize(self.geometry(box, landmarks), width, height)
+        region = self.rasterize(self.geometry(box, landmarks), width, height)
+        return (
+            _protect_features(region, box, landmarks, width, height)
+            if self.protect_features
+            else region
+        )
+
+
+def _protect_features(region, box, landmarks, width, height):
+    """Union a bounded hull of canonical features only when geometry exposes one.
+
+    Points more than 20 percent beyond their detector box are ignored. Three
+    non-collinear in-frame points are required. The hull gets a two-percent
+    minimum-box-dimension margin, at least one pixel. This is a geometric guard,
+    not an independent anatomical contour or a detector-confidence guarantee.
+    """
+    if region is None or landmarks is None:
+        return region
+    points = []
+    for name in ("right_eye", "left_eye", "nose_tip", "right_mouth_corner", "left_mouth_corner"):
+        if name not in landmarks.names:
+            continue
+        x, y = landmarks[name]
+        if (
+            0 <= x < width
+            and 0 <= y < height
+            and -0.2 <= (x - box.x1) / box.width <= 1.2
+            and -0.2 <= (y - box.y1) / box.height <= 1.2
+        ):
+            points.append((math.floor(x), math.floor(y)))
+    if len(points) < 3:
+        return region
+    a, b, c, d = region.bounds
+    if all(a <= x < c and b <= y < d and region.alpha[y - b, x - a] >= 0.999 for x, y in points):
+        return region
+    hull = cv2.convexHull(np.array(points, dtype=np.int32))
+    if cv2.contourArea(hull) == 0:
+        return region
+    radius = max(1, 0.02 * min(box.width, box.height))
+    x, y = np.array(points).T
+    bounds = Box(
+        min(a, float(x.min() - radius)),
+        min(b, float(y.min() - radius)),
+        max(c, float(x.max() + radius + 1)),
+        max(d, float(y.max() + radius + 1)),
+    ).bounds(width, height)
+    left, top, right, bottom = bounds
+    alpha = np.zeros((bottom - top, right - left), np.float32)
+    alpha[b - top : d - top, a - left : c - left] = region.alpha
+    core = np.zeros_like(alpha, dtype=np.uint8)
+    cv2.fillConvexPoly(core, hull - np.array([left, top], np.int32), 1)
+    alpha[distance_transform_edt(core == 0) <= radius] = 1
+    return MaskRegion(bounds, alpha)
 
 
 class MaskSession:
@@ -330,6 +391,8 @@ class MaskSession:
                         )
                         region = _union(region, self.mask.rasterize(stable, width, height))
                     history[face.track_id] = (box, filtered)
+                if self.mask.protect_features:
+                    region = _protect_features(region, face.box, face.landmarks, width, height)
             if region is not None:
                 regions[face.track_id] = region
         self._history = history

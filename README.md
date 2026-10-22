@@ -206,6 +206,17 @@ offset. Explicit `FaceMask(...)` experiments retain their previous output.
 Omitting `mask` now selects `LandmarkFaceMask()`. Old analysis caches work via
 the upright fallback.
 
+`protect_features=True` adds a small convex feature hull when a bounded canonical
+landmark lies outside the opaque geometry, for example a profile nose protruding
+beyond the detector box. It requires three non-collinear in-frame landmarks and
+ignores points more than 20 percent beyond the box. Its margin is two percent
+of the smaller box dimension, with a one-pixel minimum. This applies to
+`LandmarkFaceMask.build`, mask sessions, and semantic geometric fallbacks.
+The analytic `geometry`, `rasterize`, and `alpha_at` methods expose the underlying
+shape without the extra hull. Set `protect_features=False` for pure geometry
+experiments. This guard uses model estimates and does not identify real skin,
+hair, or ears. Accepted semantic masks retain their normal class exclusions.
+
 Inspect boundaries on your footage before tuning effects:
 
 ```bash

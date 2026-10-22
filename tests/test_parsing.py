@@ -152,6 +152,16 @@ def test_custom_fallback_geometry_is_independent_of_semantic_boundary_edits():
     assert session.diagnostics == {0: "fallback_empty"}
 
 
+def test_semantic_fallback_protects_a_measured_profile_nose_outside_its_box():
+    marks = Landmarks(NAMES, ((12, 12), (20, 12), (4, 16), (13, 20), (19, 20)))
+    frame = FrameAnalysis(0, (replace(FACE, landmarks=marks),))
+    analysis, parsing = cache((frame,))
+    session = ParsedFaceMask(parsing).create_session()
+    alpha = full(session.build(analysis.frames[0], 64, 48)[0])
+    assert session.diagnostics == {0: "fallback_incomplete"}
+    assert alpha[16, 4] == 1
+
+
 def test_per_face_overrides_keep_cache_binding_and_scope_strict_errors():
     other = replace(FACE, track_id=1, box=Box(36, 6, 56, 26), landmarks=None)
     frame = FrameAnalysis(0, (FACE, other))

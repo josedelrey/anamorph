@@ -211,6 +211,14 @@ provenance. New tracked geometry invalidates old parsing caches. Box-only
 2 remains unchanged because predictions use existing box/landmark fields and
 the additional diagnostics are JSON provenance. No frames enter the cache.
 
+Geometric masks optionally protect protruding feature points using a bounded
+convex hull, only when a canonical point would otherwise lack opaque coverage.
+The relative-box gate rejects remote outliers and a small source-pixel margin
+covers each accepted feature pixel. Low-level analytic shape methods remain
+separate from this guard. Semantic fallback uses the same geometric builder.
+Accepted semantic masks never apply an unsegmented feature hull over their
+class vetoes.
+
 ## Effects and extension points
 
 `SpatialEffect.apply(rgb) -> rgb` is an independent stateless image operator.

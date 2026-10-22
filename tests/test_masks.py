@@ -94,6 +94,39 @@ def test_eye_line_guides_roll_and_features_have_opaque_coverage():
             assert alpha[int(y), int(x)] == 1
 
 
+def test_protruding_profile_nose_gets_local_opaque_protection():
+    box = Box(6, 6, 26, 26)
+    marks = Landmarks(NAMES, ((12, 12), (20, 12), (4, 16), (13, 20), (19, 20)))
+    plain = LandmarkFaceMask(protect_features=False)
+    protected = LandmarkFaceMask()
+    before = full(plain.build(box, 160, 160, landmarks=marks))
+    after = full(protected.build(box, 160, 160, landmarks=marks))
+    assert before[16, 4] < 1 and after[16, 4] == 1
+    assert np.all(after >= before)
+    assert np.count_nonzero(after != before) < 100
+    session = MaskSession(protected)
+    observed = FrameAnalysis(0, (Face(0, box, landmarks=marks),))
+    np.testing.assert_array_equal(full(session.build(observed, 160, 160)[0]), after)
+
+
+def test_feature_guard_ignores_far_outliers_and_incomplete_layouts():
+    box = Box(6, 6, 26, 26)
+    for marks in [
+        Landmarks(NAMES, ((12, 12), (20, 12), (-100, 16), (13, 20), (19, 20))),
+        Landmarks(("nose_tip",), ((4, 16),)),
+    ]:
+        before = full(
+            LandmarkFaceMask(protect_features=False).build(box, 160, 160, landmarks=marks)
+        )
+        after = full(LandmarkFaceMask().build(box, 160, 160, landmarks=marks))
+        np.testing.assert_array_equal(after, before)
+
+
+def test_feature_guard_option_must_be_boolean():
+    with pytest.raises(ValueError, match="boolean"):
+        LandmarkFaceMask(protect_features=1)
+
+
 def test_forehead_and_chin_belong_to_opaque_core():
     mask = LandmarkFaceMask()
     geometry = mask.geometry(BOX, points())
