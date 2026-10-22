@@ -121,7 +121,11 @@ These thresholds are heuristic and do not measure silhouette accuracy. The
 default geometric fallback uses the measured box when available, favors
 coverage, and can include hair or ears.
 `fallback="error"` instead refuses the frame. Per-frame diagnostics distinguish
-accepted, held, and fallback cases. Unusable parses clear temporal history.
+accepted, held, and fallback cases. Unusable parses clear accepted-label history.
+An optional per-track recovery counter requires consecutive usable observations
+before returning from geometry to semantics. Invalid or missing observations
+interrupt the counter. It never delays entry into fallback or creates a partial
+crossfade. Default recovery is one observation, preserving earlier behavior.
 Missing observations reuse the last accepted labels and freeze alpha. Gaps,
 absent IDs, and box IoU below 0.1 reset history. Stale held tracks still require
 motion-aware tracking to cover moving faces reliably.

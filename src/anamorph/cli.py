@@ -75,6 +75,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     render.add_argument("--parsing", type=Path, help="Semantic cache required by --shape parsed")
     render.add_argument(
+        "--recovery-frames",
+        type=int,
+        default=None,
+        help="Usable observations required to leave semantic fallback (default: 1)",
+    )
+    render.add_argument(
         "--fallback",
         choices=["geometry", "error"],
         default="geometry",
@@ -179,12 +185,15 @@ def main(argv: list[str] | None = None) -> None:
                     stabilization=args.stabilization,
                     fallback=args.fallback,
                     expansion=args.expansion if args.expansion is not None else 0,
+                    recovery_frames=args.recovery_frames if args.recovery_frames is not None else 1,
                 )
             else:
                 if args.parsing is not None:
                     raise ValueError("--parsing requires --shape parsed")
                 if args.expansion is not None:
                     raise ValueError("--expansion requires --shape parsed")
+                if args.recovery_frames is not None:
+                    raise ValueError("--recovery-frames requires --shape parsed")
                 mask = (
                     LandmarkFaceMask(
                         **mask_options,

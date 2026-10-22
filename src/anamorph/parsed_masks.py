@@ -55,6 +55,9 @@ class ParsedFaceMask:
     Edits stop at the parsing crop edges. Quality checks run BEFORE edits, so
     deliberate erosion cannot be mistaken for a parsing failure. fallback_mask
     controls geometric fallbacks independently of accepted semantic masks.
+    recovery_frames requires consecutive usable observed parses before leaving
+    a fallback. Failures enter fallback immediately. This reduces rapid toggling
+    while retaining current coverage, at the cost of longer geometric coverage.
     """
 
     parsing: VideoParsing
@@ -65,6 +68,7 @@ class ParsedFaceMask:
     expansion: float = 0
     fallback_mask: LandmarkFaceMask = field(default_factory=LandmarkFaceMask)
     boundary_labels: tuple[str, ...] = ("background",)
+    recovery_frames: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.parsing, VideoParsing):
@@ -77,6 +81,8 @@ class ParsedFaceMask:
             raise ValueError("fallback must be geometry or error")
         if not math.isfinite(self.expansion):
             raise ValueError("expansion must be finite")
+        if type(self.recovery_frames) is not int or self.recovery_frames < 1:
+            raise ValueError("recovery_frames must be a positive integer")
         if not isinstance(self.fallback_mask, LandmarkFaceMask):
             raise ValueError("fallback_mask must be a LandmarkFaceMask")
         if (
@@ -256,6 +262,7 @@ class ParsedMaskSession:
         self.diagnostics: dict[int, str] = {}
         self._last_index = -1
         self._history: dict[int, tuple[Face, MaskRegion, FaceParsing]] = {}
+        self._recovering: dict[int, tuple[Box, int]] = {}
         self._fallback = mask.fallback_mask
 
     def build(self, frame: FrameAnalysis, width: int, height: int) -> dict[int, MaskRegion]:
@@ -275,7 +282,8 @@ class ParsedMaskSession:
         parsed = {face.track_id: face for face in self.mask.parsing.for_frame(frame, width, height)}
         if frame.index != self._last_index + 1:
             self._history.clear()
-        regions, history, diagnostics = {}, {}, {}
+            self._recovering.clear()
+        regions, history, diagnostics, recovering = {}, {}, {}, {}
         measurements = _measurements(frame)
         ids = tuple(FACE_PARSING_LABELS.index(name) for name in self.mask.included_labels)
         for face in frame.faces:
@@ -318,6 +326,7 @@ class ParsedMaskSession:
                     fallback_box, width, height, landmarks=checked_face.landmarks
                 )
                 diagnostics[face.track_id] = "fallback_missing"
+                recovering[face.track_id] = (face.box, 0)
                 if region is not None:
                     regions[face.track_id] = region
                 continue
@@ -343,8 +352,21 @@ class ParsedMaskSession:
                 diagnostics[face.track_id] = (
                     "fallback_empty" if not np.any(core) else "fallback_incomplete"
                 )
+                recovering[face.track_id] = (face.box, 0)
                 continue
             else:
+                pending = self._recovering.get(face.track_id)
+                if pending is not None and pending[0].iou(face.box) >= 0.1:
+                    count = pending[1] + 1 if face.observed else 0
+                    if count < self.mask.recovery_frames:
+                        region = self._fallback.build(
+                            fallback_box, width, height, landmarks=checked_face.landmarks
+                        )
+                        if region is not None:
+                            regions[face.track_id] = region
+                        diagnostics[face.track_id] = "fallback_recovery"
+                        recovering[face.track_id] = (face.box, count)
+                        continue
                 core = _edit_core(core, allowed, self.mask.expansion)
                 alpha = core.astype(np.float32)
                 if self.mask.feather > 0 and np.any(core):
@@ -372,6 +394,7 @@ class ParsedMaskSession:
             history[face.track_id] = (checked_face, region, record)
             diagnostics[face.track_id] = status
         self._history = history
+        self._recovering = recovering
         self.diagnostics = diagnostics
         self._last_index = frame.index
         return regions

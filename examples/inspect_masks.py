@@ -70,6 +70,7 @@ def main():
     parser.add_argument("--feather", type=float, default=None)
     parser.add_argument("--parsing", type=Path, help="Compare cached semantic masks to geometry")
     parser.add_argument("--stabilization", type=float, default=0.65)
+    parser.add_argument("--recovery-frames", type=int, default=1)
     parser.add_argument("--chin-extension", type=float, default=0.10)
     args = parser.parse_args()
     analysis = VideoAnalysis.load(args.analysis)
@@ -97,6 +98,7 @@ def main():
             parsing,
             feather=args.feather if args.feather is not None else 2,
             stabilization=args.stabilization,
+            recovery_frames=args.recovery_frames,
         )
         if parsing
         else geometry_mask
@@ -112,6 +114,7 @@ def main():
             "stabilization": mask.stabilization,
             "included_labels": mask.included_labels,
             "fallback": mask.fallback,
+            "recovery_frames": mask.recovery_frames,
             "parsing_sha256": file_sha256(args.parsing),
         }
         if parsing
@@ -132,6 +135,8 @@ def main():
     offscreen = 0
     stop = min(args.start + args.frames, len(analysis.frames))
     statuses = Counter()
+    previous_status = {}
+    status_switches = 0
     excluded_pixels = excluded_nonzero = 0
     if parsing is not None:
         if args.start < parsing.start or args.start >= parsing.start + len(parsing.frames):
@@ -153,6 +158,16 @@ def main():
             if parsing is not None:
                 current_status = sessions[1].diagnostics
                 statuses.update(current_status.values())
+                categories = {
+                    track: ("fallback" if status.startswith("fallback") else "semantic")
+                    for track, status in current_status.items()
+                }
+                status_switches += sum(
+                    previous_status[track] != category
+                    for track, category in categories.items()
+                    if track in previous_status
+                )
+                previous_status = categories
                 for record in parsing.frames[frame.index - parsing.start]:
                     if current_status[record.track_id] != "parsed":
                         continue
@@ -255,6 +270,7 @@ def main():
             value for key, value in statuses.items() if key.startswith("fallback")
         )
         report["semantic_status_counts"] = dict(statuses)
+        report["semantic_fallback_switches"] = status_switches
         report["excluded_label_pixels_in_accepted_masks"] = excluded_pixels
         report["nonzero_alpha_on_excluded_labels"] = excluded_nonzero
         assert excluded_nonzero == 0

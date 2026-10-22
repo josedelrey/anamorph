@@ -369,6 +369,17 @@ reports `parsed`, `held`, `fallback_empty`, `fallback_incomplete`, or
 `fallback_missing` after `build(frame_analysis, width, height)`. Held tracks
 reuse their previous accepted labels and remain stale without motion prediction.
 
+`recovery_frames=3` requires three consecutive usable observed parses before
+switching back from geometry to semantics after a failure. An unusable parse
+still triggers fallback immediately. Pending recovery is reported as
+`fallback_recovery`. Missing observations interrupt recovery. Frame gaps,
+absent tracks, and large box jumps reset it. The default `1` preserves immediate
+recovery. Longer recovery can reduce rapid switching but keeps broader geometric
+masks, including possible hair/ear coverage, for longer. It is not a crossfade
+and never fades in the current opaque face core. The CLI and inspection example
+accept `--recovery-frames` for parsed masks. Inspection reports count adjacent
+semantic/fallback switches separately from geometric boundary motion.
+
 `expansion` grows or shrinks the opaque core by a signed distance in source
 pixels. Positive values grow into background while retaining predicted hair,
 ear, and neck exclusions. Negative values deliberately remove facial coverage,

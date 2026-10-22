@@ -194,6 +194,71 @@ def test_semantic_per_track_parameters_and_sessions_are_independent():
     np.testing.assert_array_equal(full(regions[1]), full(again[1]))
 
 
+def test_recovery_requires_consecutive_observations_and_preserves_fallback_coverage():
+    frames = tuple(FrameAnalysis(i, (FACE,)) for i in range(7))
+    empty = np.zeros((48, 64), np.uint8)
+    analysis, parsing = cache(
+        frames,
+        [(labels(),), (empty,), (labels(),), (empty,), (labels(),), (labels(),), (labels(),)],
+    )
+    session = ParsedFaceMask(parsing, recovery_frames=3).create_session()
+    statuses = []
+    for frame in analysis.frames:
+        alpha = full(session.build(frame, 64, 48)[0])
+        statuses.append(session.diagnostics[0])
+        for x, y in MARKS.points:
+            assert alpha[int(y), int(x)] == 1
+    assert statuses == [
+        "parsed",
+        "fallback_empty",
+        "fallback_recovery",
+        "fallback_empty",
+        "fallback_recovery",
+        "fallback_recovery",
+        "parsed",
+    ]
+    # Stable observations eventually restore the strict semantic exclusions.
+    assert np.all(alpha[np.isin(labels(), [7, 8, 14, 17])] == 0)
+
+
+def test_held_observations_cannot_complete_recovery():
+    held = replace(FACE, observed=False, missing_frames=1)
+    frames = (
+        FrameAnalysis(0, (FACE,)),
+        FrameAnalysis(1, (FACE,)),
+        FrameAnalysis(2, (held,)),
+        FrameAnalysis(3, (FACE,)),
+        FrameAnalysis(4, (FACE,)),
+    )
+    analysis, parsing = cache(
+        frames, [(np.zeros((48, 64), np.uint8),), (labels(),), (), (labels(),), (labels(),)]
+    )
+    session = ParsedFaceMask(parsing, recovery_frames=2).create_session()
+    statuses = []
+    for frame in analysis.frames:
+        session.build(frame, 64, 48)
+        statuses.append(session.diagnostics[0])
+    assert statuses == [
+        "fallback_empty",
+        "fallback_recovery",
+        "fallback_missing",
+        "fallback_recovery",
+        "parsed",
+    ]
+
+
+def test_recovery_state_resets_across_absence_or_frame_gap():
+    frames = (FrameAnalysis(0, (FACE,)), FrameAnalysis(1), FrameAnalysis(2, (FACE,)))
+    analysis, parsing = cache(frames, [(np.zeros((48, 64), np.uint8),), (), (labels(),)])
+    for skip_absent in [False, True]:
+        session = ParsedFaceMask(parsing, recovery_frames=3).create_session()
+        session.build(analysis.frames[0], 64, 48)
+        if not skip_absent:
+            session.build(analysis.frames[1], 64, 48)
+        session.build(analysis.frames[2], 64, 48)
+        assert session.diagnostics == {0: "parsed"}
+
+
 def test_current_semantics_veto_previous_mask_after_temporal_filtering():
     first, second = labels(), labels()
     second[10:12, 17:19] = 17
@@ -514,6 +579,8 @@ def test_parse_and_render_cli(video, detector, tmp_path, monkeypatch):
                 "FFV1",
                 "--expansion",
                 "2",
+                "--recovery-frames",
+                "3",
             ]
         )
     assert output.exists() and parser.calls == 6
@@ -592,6 +659,9 @@ def test_render_rejects_different_track_analysis_before_export(video, detector, 
         {"boundary_labels": ("unknown",)},
         {"boundary_labels": ("hair", "hair")},
         {"boundary_labels": "hair"},
+        {"recovery_frames": 0},
+        {"recovery_frames": True},
+        {"recovery_frames": 1.5},
     ],
 )
 def test_mask_parameter_validation(kwargs):
