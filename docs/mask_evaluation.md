@@ -115,3 +115,31 @@ The overall missed-face rate is weighted by annotated facial area. Inspect
 per-face and condition-specific failures because a large close-up can dominate
 that average. A small development set cannot establish anonymity or exhaustive
 detection accuracy. Unannotated faces do not contribute to these measurements.
+
+## Additional pose and motion footage
+
+[VidTIMIT](https://conradsanderson.id.au/vidtimit/) provides face recordings
+with left/right and up/down head rotations across three sessions. It is useful
+for profile and temporal stress testing. It does not provide ground-truth face
+segmentation, so detection counts and model-landmark coverage on these videos
+are diagnostics, not independently measured mask accuracy.
+
+```bash
+uv run python examples/prepare_vidtimit.py --download
+```
+
+This explicit acquisition downloads two pinned subject archives serially and
+retains the original documentation with its usage conditions. It prepares all
+six rotation sequences under `local_inputs/face_evaluation/vidtimit/prepared/`.
+Every FFV1 video is decoded and compared pixel-for-pixel with the original JPEG
+decodes. The manifest records frame mappings, SHA-256 hashes, and the documented
+25 fps timing. Existing prepared data is preserved. Omit `--download` to work
+offline with already acquired archives. Neither footage nor derived videos are
+versioned or included in Anamorph's MIT license.
+
+The upstream terms permit research usage with the notice retained and require
+citation of C. Sanderson and B.C. Lovell, *Multi-Region Probabilistic Histograms
+for Robust and Scalable Identity Inference*, LNCS 5558, 199–208, 2009, in
+resulting publications. Consult the retained original documentation for the
+complete conditions. Add independently reviewed facial outlines separately
+before making face-area accuracy claims.
