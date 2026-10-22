@@ -66,6 +66,23 @@ def test_scene_cut_rejects_all_motion_even_without_tracks():
     assert result.scene_cut and not result.predictions
 
 
+def test_failed_lk_coordinates_are_never_sent_to_reverse_tracking(monkeypatch):
+    calls = []
+
+    def failed(old, new, points, guess, **kwargs):
+        calls.append(points)
+        return (
+            np.full_like(points, np.nan),
+            np.zeros((len(points), 1), np.uint8),
+            np.zeros((len(points), 1), np.float32),
+        )
+
+    monkeypatch.setattr(cv2, "calcOpticalFlowPyrLK", failed)
+    result = SparseOpticalFlow().estimate(image(), image(1), (Face(0, Box(30, 40, 110, 120)),))
+    assert len(calls) == 1
+    assert not result.predictions and result.diagnostics == {0: "inconsistent_flow"}
+
+
 def test_predictions_preserve_missing_age_and_move_landmarks():
     tracker = IoUTracker(smoothing=1, max_missing=2)
     marks = Landmarks(("nose",), ((70, 80),))

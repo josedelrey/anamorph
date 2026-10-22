@@ -108,7 +108,16 @@ class SparseOpticalFlow:
             if forward is None or found is None or error is None:
                 diagnostics[face.track_id] = "flow_failed"
                 continue
-            backward, returned, _ = cv2.calcOpticalFlowPyrLK(new, old, forward, None, **params)
+            finite = (found.ravel() == 1) & np.isfinite(forward.reshape(-1, 2)).all(axis=1)
+            if finite.sum() < self.min_points:
+                diagnostics[face.track_id] = "inconsistent_flow"
+                continue
+            # Failed LK coordinates are unspecified. Never feed NaNs or garbage
+            # from failed points into the backward pass, even though later
+            # filtering would reject their measurements.
+            safe_forward = forward.copy()
+            safe_forward[~finite] = points[~finite]
+            backward, returned, _ = cv2.calcOpticalFlowPyrLK(new, old, safe_forward, None, **params)
             if backward is None or returned is None:
                 diagnostics[face.track_id] = "flow_failed"
                 continue
