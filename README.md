@@ -455,6 +455,66 @@ terms restrict the dataset and derived data to non-commercial research.
 External assets are separate from Anamorph's MIT code license. The downloader
 retains the upstream license beside the model and verifies both assets by hash.
 
+### Export face masks for video editors
+
+Export a separate grayscale matte to mask effects or another video layer in
+DaVinci Resolve, Fusion, or other editors. Faces are white, background is black,
+and feathered boundaries are gray. Overlapping faces use the maximum mask value.
+The exporter reuses the existing tracked masks, including semantic parsing and
+fallbacks when configured. It performs no detection or parsing inference.
+
+**High-quality ProRes 4444 MOV is the default.** This requires the `ffmpeg`
+executable on your `PATH`, built with the `prores_ks` encoder. FFmpeg is a
+separate system dependency, not installed by `uv sync`. The MOV carries a
+10-bit grayscale matte in video-range YUV 4:4:4, without an alpha channel.
+ProRes is a high-quality intermediate codec with small compression and rounding
+errors. Use the PNG option when exact quantized mask values are required.
+
+```bash
+uv run anamorph export-masks local_inputs/clip.mp4 outputs/analysis.json outputs/face_masks.mov
+uv run anamorph export-masks local_inputs/clip.mp4 outputs/analysis.json outputs/face_masks_png --format png
+```
+
+`--format png` writes lossless 16-bit grayscale files named
+`mask_00000000.png`, `mask_00000001.png`, and so on, plus `sequence.json` with
+dimensions, frame count, frame rate, and source hash. PNG export needs no
+FFmpeg. Import the numbered files as an image sequence and set its frame rate
+from `sequence.json`. The PNG output directory must be new. `--overwrite` can
+replace an existing MOV file, but never replaces an existing PNG directory.
+
+Both options accept the same mask settings as `render`. For semantic masks:
+
+```bash
+uv run anamorph export-masks local_inputs/clip.mp4 outputs/analysis.json outputs/semantic_masks.mov --shape parsed --parsing outputs/parsing.npz --feather 2
+```
+
+The equivalent Python API is:
+
+```python
+from anamorph import VideoAnalysis, export_masks
+
+report = export_masks(
+    "local_inputs/clip.mp4",
+    "outputs/face_masks.mov",
+    analysis=VideoAnalysis.load("outputs/analysis.json"),
+)
+```
+
+Pass `format="png"` with a new directory to write the image sequence, or pass
+`mask=ParsedFaceMask(parsing, ...)` to reuse semantic boundaries. Each export
+starts a fresh mask session and stages and verifies its output before publishing.
+Every source frame is retained, including black frames without faces.
+Resolution, frame count, and constant frame rate match the analysis. Original
+timestamps, timecode, audio, and other source metadata are not copied.
+Use constant-frame-rate sources and align source frame zero in the editor.
+
+In Resolve's Fusion page, feed the matte through a Bitmap node set to
+**Luminance**, then connect it to the blue mask input of a Blur or Merge node.
+Use **Video** data levels for the MOV or **Full** levels for the PNG sequence,
+and avoid applying grades, LUTs, or color transforms to matte values. Align
+the matte and footage before trimming, scaling, or retiming them together.
+Mask quality and detection limitations are the same as normal rendering.
+
 ### CLI and examples
 
 The CLI is a lightweight wrapper over the same Python functions:

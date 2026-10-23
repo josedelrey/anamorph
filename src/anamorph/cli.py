@@ -8,6 +8,7 @@ from pathlib import Path
 from .analysis import VideoAnalysis
 from .detection import HaarFaceDetector, YuNetFaceDetector
 from .effects import GaussianBlur, Pixelate
+from .mask_export import export_masks
 from .masks import FaceMask, LandmarkFaceMask
 from .models import download_face_parser_model, download_yunet_model
 from .parsed_masks import ParsedFaceMask
@@ -23,6 +24,90 @@ def _inference_size(value: str) -> int | None:
         return int(value)
     except ValueError:
         raise argparse.ArgumentTypeError("Use an integer pixel limit or 'native'") from None
+
+
+def _add_mask_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--shape", choices=["face", "parsed", "ellipse", "rectangle"], default="face"
+    )
+    parser.add_argument("--parsing", type=Path, help="Semantic cache required by --shape parsed")
+    parser.add_argument(
+        "--recovery-frames",
+        type=int,
+        default=None,
+        help="Usable observations required to leave semantic fallback (default: 1)",
+    )
+    parser.add_argument(
+        "--fallback",
+        choices=["geometry", "error"],
+        default="geometry",
+        help="Unusable semantic parse policy (default: geometry)",
+    )
+    parser.add_argument("--scale-x", type=float, default=None)
+    parser.add_argument("--scale-y", type=float, default=None)
+    parser.add_argument("--offset-y", type=float, default=None)
+    parser.add_argument(
+        "--expansion",
+        type=float,
+        default=None,
+        help="Parsed core growth in source pixels, negative to shrink (default: 0)",
+    )
+    parser.add_argument(
+        "--feather",
+        type=float,
+        default=None,
+        help="Radius fraction for geometric masks, source pixels for parsed masks",
+    )
+    parser.add_argument(
+        "--chin-extension",
+        type=float,
+        default=0.10,
+        help="Face-mask lower radius extension in [0, 1] (default: 0.10)",
+    )
+    parser.add_argument(
+        "--stabilization",
+        type=float,
+        default=0.65,
+        help="Current mask state weight in (0, 1] (default: 0.65)",
+    )
+
+
+def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | ParsedFaceMask:
+    mask_options = {
+        key: getattr(args, key)
+        for key in ("scale_x", "scale_y", "offset_y", "feather")
+        if getattr(args, key) is not None
+    }
+    if args.shape == "parsed":
+        if args.parsing is None:
+            raise ValueError("--shape parsed requires --parsing")
+        if any(key != "feather" for key in mask_options):
+            raise ValueError("Parsed masks do not use scale-x, scale-y, or offset-y")
+        mask = ParsedFaceMask(
+            VideoParsing.load(args.parsing),
+            feather=args.feather if args.feather is not None else 2,
+            stabilization=args.stabilization,
+            fallback=args.fallback,
+            expansion=args.expansion if args.expansion is not None else 0,
+            recovery_frames=args.recovery_frames if args.recovery_frames is not None else 1,
+        )
+    else:
+        if args.parsing is not None:
+            raise ValueError("--parsing requires --shape parsed")
+        if args.expansion is not None:
+            raise ValueError("--expansion requires --shape parsed")
+        if args.recovery_frames is not None:
+            raise ValueError("--recovery-frames requires --shape parsed")
+        mask = (
+            LandmarkFaceMask(
+                **mask_options,
+                stabilization=args.stabilization,
+                chin_extension=args.chin_extension,
+            )
+            if args.shape == "face"
+            else FaceMask(shape=args.shape, **mask_options)
+        )
+    return mask
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -70,51 +155,23 @@ def main(argv: list[str] | None = None) -> None:
     render.add_argument("--effect", choices=["blur", "pixelate"], default="blur")
     render.add_argument("--sigma", type=float, default=12)
     render.add_argument("--cells", type=int, default=8)
-    render.add_argument(
-        "--shape", choices=["face", "parsed", "ellipse", "rectangle"], default="face"
-    )
-    render.add_argument("--parsing", type=Path, help="Semantic cache required by --shape parsed")
-    render.add_argument(
-        "--recovery-frames",
-        type=int,
-        default=None,
-        help="Usable observations required to leave semantic fallback (default: 1)",
-    )
-    render.add_argument(
-        "--fallback",
-        choices=["geometry", "error"],
-        default="geometry",
-        help="Unusable semantic parse policy (default: geometry)",
-    )
-    render.add_argument("--scale-x", type=float, default=None)
-    render.add_argument("--scale-y", type=float, default=None)
-    render.add_argument("--offset-y", type=float, default=None)
-    render.add_argument(
-        "--expansion",
-        type=float,
-        default=None,
-        help="Parsed core growth in source pixels, negative to shrink (default: 0)",
-    )
-    render.add_argument(
-        "--feather",
-        type=float,
-        default=None,
-        help="Radius fraction for geometric masks, source pixels for parsed masks",
-    )
-    render.add_argument(
-        "--chin-extension",
-        type=float,
-        default=0.10,
-        help="Face-mask lower radius extension in [0, 1] (default: 0.10)",
-    )
-    render.add_argument(
-        "--stabilization",
-        type=float,
-        default=0.65,
-        help="Current mask state weight in (0, 1] (default: 0.65)",
-    )
+    _add_mask_options(render)
     render.add_argument("--codec", default="mp4v")
     render.add_argument("--overwrite", action="store_true")
+    export = commands.add_parser(
+        "export-masks", help="Export face mattes as ProRes 4444 MOV (default) or 16-bit PNG frames"
+    )
+    export.add_argument("source", type=Path)
+    export.add_argument("analysis", type=Path)
+    export.add_argument("output", type=Path, help="MOV file or new PNG sequence directory")
+    export.add_argument(
+        "--format",
+        choices=["mov", "png"],
+        default="mov",
+        help="Output format (default: mov, ProRes 4444)",
+    )
+    export.add_argument("--overwrite", action="store_true", help="Replace an existing MOV file")
+    _add_mask_options(export)
     args = parser.parse_args(argv)
     try:
         if args.command == "download-yunet":
@@ -139,6 +196,26 @@ def main(argv: list[str] | None = None) -> None:
             )
             parsing.save(args.parsing, overwrite=args.overwrite)
             print(f"Saved {len(parsing.frames)} parsed frames to {args.parsing}")
+        elif args.command == "export-masks":
+            for original in (args.source, args.analysis, args.parsing):
+                if original is not None and (
+                    args.output.resolve() == original.resolve()
+                    or (
+                        args.output.exists()
+                        and original.exists()
+                        and args.output.samefile(original)
+                    )
+                ):
+                    raise ValueError("Mask output must differ from source, analysis, and parsing")
+            report = export_masks(
+                args.source,
+                args.output,
+                analysis=VideoAnalysis.load(args.analysis),
+                mask=_mask_from_args(args),
+                format=args.format,
+                overwrite=args.overwrite,
+            )
+            print(f"Wrote {report.frame_count} mask frames to {report.output} ({report.codec})")
         elif args.command == "analyze":
             source, cache = Path(args.source), Path(args.analysis)
             if source.resolve() == cache.resolve() or (
@@ -169,40 +246,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Saved {len(analysis.frames)} analyzed frames to {args.analysis}")
         else:
             effect = GaussianBlur(args.sigma) if args.effect == "blur" else Pixelate(args.cells)
-            mask_options = {
-                key: getattr(args, key)
-                for key in ("scale_x", "scale_y", "offset_y", "feather")
-                if getattr(args, key) is not None
-            }
-            if args.shape == "parsed":
-                if args.parsing is None:
-                    raise ValueError("--shape parsed requires --parsing")
-                if any(key != "feather" for key in mask_options):
-                    raise ValueError("Parsed masks do not use scale-x, scale-y, or offset-y")
-                mask = ParsedFaceMask(
-                    VideoParsing.load(args.parsing),
-                    feather=args.feather if args.feather is not None else 2,
-                    stabilization=args.stabilization,
-                    fallback=args.fallback,
-                    expansion=args.expansion if args.expansion is not None else 0,
-                    recovery_frames=args.recovery_frames if args.recovery_frames is not None else 1,
-                )
-            else:
-                if args.parsing is not None:
-                    raise ValueError("--parsing requires --shape parsed")
-                if args.expansion is not None:
-                    raise ValueError("--expansion requires --shape parsed")
-                if args.recovery_frames is not None:
-                    raise ValueError("--recovery-frames requires --shape parsed")
-                mask = (
-                    LandmarkFaceMask(
-                        **mask_options,
-                        stabilization=args.stabilization,
-                        chin_extension=args.chin_extension,
-                    )
-                    if args.shape == "face"
-                    else FaceMask(shape=args.shape, **mask_options)
-                )
+            mask = _mask_from_args(args)
             report = render_video(
                 args.source,
                 args.output,

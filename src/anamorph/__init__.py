@@ -12,6 +12,7 @@ from .effects import (
     SpatialEffect,
     TemporalBlend,
 )
+from .mask_export import export_masks
 from .masks import (
     FaceMask,
     FaceMaskGeometry,
@@ -90,6 +91,7 @@ __all__ = [
     "analyze_video",
     "download_yunet_model",
     "download_face_parser_model",
+    "export_masks",
     "parse_video",
     "process_video",
     "render_video",
