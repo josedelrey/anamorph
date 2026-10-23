@@ -546,6 +546,151 @@ def test_disconnected_neighbor_does_not_enter_own_face_mask():
     assert session.diagnostics == {0: "parsed", 1: "parsed"}
 
 
+@pytest.mark.parametrize("expansion", [0, 2])
+@pytest.mark.parametrize("stabilization", [0.1, 1])
+def test_small_facial_island_inherits_fade_without_seeding_an_opaque_patch(
+    expansion, stabilization
+):
+    clean, noisy = labels(), labels()
+    noisy[16, 27] = 1
+    frames = (FrameAnalysis(0, (FACE,)), FrameAnalysis(1, (FACE,)))
+    analysis, parsing = cache(frames, [(clean,), (noisy,)])
+    session = ParsedFaceMask(
+        parsing,
+        expansion=expansion,
+        feather=8,
+        stabilization=stabilization,
+        boundary_labels=("background", "right_ear"),
+    ).create_session()
+    before = full(session.build(analysis.frames[0], 64, 48)[0])
+    after = full(session.build(analysis.frames[1], 64, 48)[0])
+    assert 0 < after[16, 27] < 1
+    np.testing.assert_array_equal(after, before)
+
+
+@pytest.mark.parametrize("threshold", [0, 0.001])
+def test_strict_island_threshold_retains_facial_component_veto(threshold):
+    data = labels()
+    data[16, 27] = 1
+    analysis, parsing = cache(maps=[(data,)])
+    result = full(
+        ParsedFaceMask(
+            parsing,
+            feather=8,
+            boundary_labels=("background", "right_ear"),
+            island_area_threshold=threshold,
+        )
+        .create_session()
+        .build(analysis.frames[0], 64, 48)[0]
+    )
+    assert result[16, 27] == 0
+
+
+def test_small_facial_island_does_not_override_surrounding_semantic_exclusions():
+    data = labels()
+    data[16, 27] = 1
+    analysis, parsing = cache(maps=[(data,)])
+    result = full(
+        ParsedFaceMask(parsing, feather=8).create_session().build(analysis.frames[0], 64, 48)[0]
+    )
+    assert np.all(result[12:20, 24:28] == 0)
+
+
+def test_large_disconnected_facial_component_still_vetoes_the_margin():
+    data = labels()
+    data[15:17, 26:28] = 1
+    analysis, parsing = cache(maps=[(data,)])
+    result = full(
+        ParsedFaceMask(parsing, feather=8, boundary_labels=("background", "right_ear"))
+        .create_session()
+        .build(analysis.frames[0], 64, 48)[0]
+    )
+    assert np.all(result[15:17, 26:28] == 0)
+    assert result[16, 25] > 0
+
+
+@pytest.mark.parametrize("measured", [False, True])
+def test_known_small_neighbor_is_protected_even_when_its_track_is_not_selected(measured):
+    data = labels()
+    data[16, 27] = 1
+    actual_box = Box(26, 15, 29, 18)
+    other = Face(1, Box(28, 15, 31, 18) if measured else actual_box)
+    detections = (Detection(FACE.box, landmarks=MARKS), Detection(actual_box)) if measured else ()
+    analysis, parsing = cache((FrameAnalysis(0, (FACE, other), detections),), [(data, data)])
+    session = ParsedFaceMask(
+        parsing, feather=8, boundary_labels=("background", "right_ear")
+    ).create_session()
+    result = full(session.build_selected(analysis.frames[0], 64, 48, frozenset({0}))[0])
+    assert result[16, 27] == 0
+    assert result[16, 26] > 0
+    assert session.diagnostics == {0: "parsed"}
+
+
+@pytest.mark.parametrize("threshold", [-0.01, 1.01, float("nan"), float("inf")])
+def test_island_area_threshold_must_be_a_finite_fraction(threshold):
+    _, parsing = cache()
+    with pytest.raises(ValueError, match="island_area_threshold"):
+        ParsedFaceMask(parsing, island_area_threshold=threshold)
+
+
+@pytest.mark.parametrize("threshold", [None, 0, 0.02])
+def test_export_cli_controls_small_island_cleanup(video, tmp_path, threshold):
+    from anamorph.analysis import file_sha256
+
+    source, _ = video
+    data = labels()
+    data[16, 27] = 1
+    frames = tuple(FrameAnalysis(index, (FACE,)) for index in range(6))
+    analysis, parsing = cache(frames, [(data,)] * 6)
+    analysis = replace(analysis, source_sha256=file_sha256(source))
+    parsing = replace(
+        parsing, source_sha256=analysis.source_sha256, analysis_sha256=_digest(analysis)
+    )
+    analysis_path, parsing_path = tmp_path / "analysis.json", tmp_path / "parsing.npz"
+    analysis.save(analysis_path)
+    parsing.save(parsing_path)
+    output = tmp_path / "matte"
+    args = [
+        "export-masks",
+        str(source),
+        str(analysis_path),
+        str(output),
+        "--shape",
+        "parsed",
+        "--parsing",
+        str(parsing_path),
+        "--format",
+        "png",
+        "--feather",
+        "8",
+        "--boundary-labels",
+        "all",
+        "--no-progress",
+    ]
+    if threshold is not None:
+        args += ["--island-area-threshold", str(threshold)]
+    with pytest.warns(VideoExportWarning):
+        main(args)
+    for index in range(6):
+        alpha = cv2.imread(str(output / f"mask_{index:08d}.png"), cv2.IMREAD_UNCHANGED)
+        assert alpha[16, 16] == 65535
+        if threshold == 0:
+            assert alpha[16, 27] == 0
+        else:
+            assert 0 < alpha[16, 27] < 65535
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "export-masks",
+                str(source),
+                str(analysis_path),
+                str(tmp_path / "invalid"),
+                "--island-area-threshold",
+                "0.01",
+            ]
+        )
+
+
 def test_no_landmarks_selects_component_in_own_box():
     data = labels()
     data[2:40, 36:62] = 1

@@ -73,6 +73,13 @@ def _add_mask_options(parser: argparse.ArgumentParser) -> None:
         "Use all to soften every boundary, including hair and ears",
     )
     parser.add_argument(
+        "--island-area-threshold",
+        type=float,
+        default=None,
+        help="Maximum discarded facial island area as a fraction of the selected core "
+        "to allow boundary coverage (default: 0.01, zero disables cleanup)",
+    )
+    parser.add_argument(
         "--chin-extension",
         type=float,
         default=0.10,
@@ -107,6 +114,9 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             expansion=args.expansion if args.expansion is not None else 0,
             recovery_frames=args.recovery_frames if args.recovery_frames is not None else 1,
             max_hold_frames=args.max_hold_frames if args.max_hold_frames is not None else 15,
+            island_area_threshold=(
+                args.island_area_threshold if args.island_area_threshold is not None else 0.01
+            ),
         )
         if args.boundary_labels is not None:
             if "all" in args.boundary_labels:
@@ -129,6 +139,8 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             raise ValueError("Semantic hold options require --shape parsed")
         if args.boundary_labels is not None:
             raise ValueError("--boundary-labels requires --shape parsed")
+        if args.island_area_threshold is not None:
+            raise ValueError("--island-area-threshold requires --shape parsed")
         mask = (
             LandmarkFaceMask(
                 **mask_options,

@@ -54,7 +54,12 @@ class ParsedFaceMask:
     opaque core into background. boundary_labels can explicitly permit a limited
     margin into other classes, for example to correct a misplaced hairline. This
     trades semantic exclusion for coverage. Negative expansion erodes the core,
-    deliberately reducing face coverage. Disconnected facial components veto growth.
+    deliberately reducing face coverage. Disconnected facial components veto growth,
+    except small prediction islands surrounded by allowed boundary classes.
+    island_area_threshold is their maximum area as a fraction of the selected
+    facial core, default 0.01. They receive only nearby expansion/feather coverage,
+    never their own opaque core. Components overlapping another tracked face's
+    box remain excluded at any size. Set the threshold to zero for a strict veto.
     Output margins extend beyond the parsing crop into unclassified background.
     Temporal support also remains inside the output working region. Distance
     smoothing suppresses ridges from pixel-stepped contours before feathering.
@@ -76,6 +81,7 @@ class ParsedFaceMask:
     boundary_labels: tuple[str, ...] = ("background",)
     recovery_frames: int = 1
     max_hold_frames: int = 15
+    island_area_threshold: float = 0.01
 
     def __post_init__(self) -> None:
         if not isinstance(self.parsing, VideoParsing):
@@ -88,6 +94,11 @@ class ParsedFaceMask:
             raise ValueError("fallback must be geometry, error, or hold")
         if not math.isfinite(self.expansion):
             raise ValueError("expansion must be finite")
+        if (
+            not math.isfinite(self.island_area_threshold)
+            or not 0 <= self.island_area_threshold <= 1
+        ):
+            raise ValueError("island_area_threshold must be finite and in [0, 1]")
         if type(self.recovery_frames) is not int or self.recovery_frames < 1:
             raise ValueError("recovery_frames must be a positive integer")
         if type(self.max_hold_frames) is not int or self.max_hold_frames < 1:
@@ -153,10 +164,12 @@ def _labels_in_frame(
     return bounds, labels
 
 
-def _component(core: np.ndarray, face: Face, bounds: tuple) -> np.ndarray:
-    count, components, _, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), 8)
+def _face_components(
+    core: np.ndarray, face: Face, bounds: tuple
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    count, components, stats, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), 8)
     if count == 1:
-        return core
+        return core, components, stats
     x1, y1, _, _ = bounds
     seeds = []
     if face.landmarks is not None:
@@ -183,15 +196,54 @@ def _component(core: np.ndarray, face: Face, bounds: tuple) -> np.ndarray:
             core.shape[1], core.shape[0]
         )
         if box is None:
-            return np.zeros_like(core)
+            return np.zeros_like(core), components, stats
         a, b, c, d = box
         overlap = np.bincount(components[b:d, a:c].ravel(), minlength=count)
         overlap[0] = 0
         winner = int(np.argmax(overlap))
         if overlap[winner] == 0:
-            return np.zeros_like(core)
+            return np.zeros_like(core), components, stats
         chosen.add(winner)
-    return np.isin(components, tuple(chosen))
+    return np.isin(components, tuple(chosen)), components, stats
+
+
+def _allow_small_islands(
+    allowed: np.ndarray,
+    core: np.ndarray,
+    components: np.ndarray,
+    stats: np.ndarray,
+    threshold: float,
+    bounds: tuple,
+    neighbors: tuple[Box, ...],
+) -> None:
+    """Allow the existing margin across small rejected facial prediction islands."""
+    limit = threshold * np.count_nonzero(core)
+    if limit < 1:
+        return
+    protected = set()
+    x1, y1, _, _ = bounds
+    for neighbor in neighbors:
+        box = Box(neighbor.x1 - x1, neighbor.y1 - y1, neighbor.x2 - x1, neighbor.y2 - y1).bounds(
+            core.shape[1], core.shape[0]
+        )
+        if box is not None:
+            a, b, c, d = box
+            protected.update(np.unique(components[b:d, a:c]).tolist())
+    for label in np.flatnonzero(stats[:, cv2.CC_STAT_AREA] <= limit):
+        if label == 0 or label in protected:
+            continue
+        x, y, w, h, _ = stats[label]
+        a, b = max(0, x - 1), max(0, y - 1)
+        c, d = min(core.shape[1], x + w + 1), min(core.shape[0], y + h + 1)
+        island = components[b:d, a:c] == label
+        if np.any(core[b:d, a:c][island]):
+            continue
+        ring = cv2.dilate(island.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        ring &= ~island
+        # Only relax a facial-class veto when the surrounding semantics already
+        # permit the margin. Explicit hair/ear/neck exclusions still apply.
+        if np.any(ring) and np.all(allowed[b:d, a:c][ring]):
+            allowed[b:d, a:c][island] = True
 
 
 def _warp_previous(region: MaskRegion, old_box: Box, new_box: Box, bounds: tuple) -> np.ndarray:
@@ -451,7 +503,7 @@ class ParsedMaskSession:
                     regions[face.track_id] = region
                 continue
             bounds, labels = sampled
-            core = _component(np.isin(labels, ids), checked_face, bounds)
+            core, components, stats = _face_components(np.isin(labels, ids), checked_face, bounds)
             # Close enclosed background holes such as unrecognized nostrils,
             # while preserving holes explicitly labelled hair, ears, or neck.
             core |= binary_fill_holes(core) & (labels == 0)
@@ -459,6 +511,21 @@ class ParsedMaskSession:
                 FACE_PARSING_LABELS.index(name) for name in self.mask.boundary_labels
             )
             allowed = core | np.isin(labels, margin_ids)
+            _allow_small_islands(
+                allowed,
+                core,
+                components,
+                stats,
+                self.mask.island_area_threshold,
+                bounds,
+                tuple(
+                    measurements[other.track_id].box
+                    if other.track_id in measurements
+                    else other.box
+                    for other in frame.faces
+                    if other.track_id != face.track_id
+                ),
+            )
             if not _usable_core(core, checked_face, bounds, width, height):
                 if self.mask.fallback == "hold":
                     hold(face, previous, "held_empty" if not np.any(core) else "held_incomplete")
@@ -507,7 +574,8 @@ class ParsedMaskSession:
                 else:
                     alpha = np.maximum(core, prior)
             # Apply exclusions LAST. Only explicitly allowed boundary classes
-            # can receive margin coverage. Disconnected faces remain excluded.
+            # can receive margin coverage. Neighbor faces remain excluded, while
+            # small prediction islands can inherit the surrounding allowed margin.
             alpha[~allowed] = 0
             region = MaskRegion(bounds, alpha.astype(np.float32))
             # Clip only the public output. Offscreen semantic support must remain

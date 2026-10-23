@@ -292,6 +292,15 @@ history to the edited mask's feather support. Quality gates inspect the raw
 semantic core before deliberate edits. Geometric fallback shape has its own
 configuration and remains an instantaneous estimate.
 
+Discarded facial components can veto the margin and create hard black islands.
+Components no larger than `island_area_threshold` times the selected core area
+(default 0.01) instead permit the existing margin if their entire adjacent ring
+already permits boundary coverage. They do not join the core or seed a new fade.
+Any component overlapping another tracked face's measured box, or tracked box
+when no measurement exists, remains protected at any size, including tracks not
+selected for rendering. Larger components remain excluded. Zero disables the
+cleanup. A much smaller undetected face can still be confused with label noise.
+
 The output working region extends beyond the inference crop by the expansion,
 feather width, and smoothing-kernel radius. It also contains transported prior
 alpha support, including its interpolation footprint. This prevents rectangular

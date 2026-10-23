@@ -433,7 +433,7 @@ growth and feathering a limited distance into predicted neck, without including
 the entire neck class. The default is `("background",)`. Adding `"hair"` or
 ears explicitly allows coverage on those classes near the selected contour.
 This trades semantic exclusion for coverage and needs visual review. It does
-not correct the underlying model. Disconnected facial components remain excluded.
+not correct the underlying model. Larger disconnected facial components remain excluded.
 
 For a larger mask with a smooth fade to black, combine `--expansion` and
 `--feather`. Both use source-frame pixels for parsed masks. The CLI's
@@ -446,11 +446,21 @@ uv run anamorph export-masks local_inputs/clip.mp4 outputs/analysis.json outputs
 
 This grows the white core by four pixels, then fades from white to black across
 the next sixteen pixels. The surrounding classes receive only this nearby
-margin, and disconnected faces remain excluded. Use
+margin, and disconnected neighboring faces remain excluded. Use
 `--boundary-labels background hair` to allow the margin only in those classes.
 Omitting the option retains strict hair, ear, and neck exclusions. The semantic
 hold fallback carries the softened shape during failed parses. Existing analysis
 and parsing caches can be reused.
+
+Small disconnected facial predictions can otherwise punch hard black islands
+into the fade. By default, discarded components no larger than 1% of the selected
+core can receive the existing margin when all their surrounding labels permit it.
+They do not seed new opaque patches. Components overlapping another tracked
+face's box remain excluded regardless of size. This is a size heuristic, so an
+undetected much smaller neighboring face can be mistaken for prediction noise.
+`--island-area-threshold` changes the area fraction, and zero restores the strict
+component veto. The Python option is `ParsedFaceMask.island_area_threshold`.
+This cleanup reuses existing caches and is enabled by default.
 
 Feathering smooths the contour's distance field before applying its fade. This
 reduces line-like ridges around stepped segmentation edges while keeping the
