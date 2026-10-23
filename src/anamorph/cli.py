@@ -39,9 +39,15 @@ def _add_mask_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--fallback",
-        choices=["geometry", "error"],
-        default="geometry",
-        help="Unusable semantic parse policy (default: geometry)",
+        choices=["geometry", "error", "hold"],
+        default="hold",
+        help="Unusable semantic parse policy (default: hold)",
+    )
+    parser.add_argument(
+        "--max-hold-frames",
+        type=int,
+        default=None,
+        help="Maximum frames without a fresh accepted parse for --fallback hold (default: 15)",
     )
     parser.add_argument("--scale-x", type=float, default=None)
     parser.add_argument("--scale-y", type=float, default=None)
@@ -83,6 +89,8 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             raise ValueError("--shape parsed requires --parsing")
         if any(key != "feather" for key in mask_options):
             raise ValueError("Parsed masks do not use scale-x, scale-y, or offset-y")
+        if args.max_hold_frames is not None and args.fallback != "hold":
+            raise ValueError("--max-hold-frames requires --fallback hold")
         mask = ParsedFaceMask(
             VideoParsing.load(args.parsing),
             feather=args.feather if args.feather is not None else 2,
@@ -90,6 +98,7 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             fallback=args.fallback,
             expansion=args.expansion if args.expansion is not None else 0,
             recovery_frames=args.recovery_frames if args.recovery_frames is not None else 1,
+            max_hold_frames=args.max_hold_frames if args.max_hold_frames is not None else 15,
         )
     else:
         if args.parsing is not None:
@@ -98,6 +107,8 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             raise ValueError("--expansion requires --shape parsed")
         if args.recovery_frames is not None:
             raise ValueError("--recovery-frames requires --shape parsed")
+        if args.max_hold_frames is not None:
+            raise ValueError("Semantic hold options require --shape parsed")
         mask = (
             LandmarkFaceMask(
                 **mask_options,
@@ -172,6 +183,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     export.add_argument("--overwrite", action="store_true", help="Replace an existing MOV file")
     _add_mask_options(export)
+    for command in (analyze, parse, render, export):
+        command.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     args = parser.parse_args(argv)
     try:
         if args.command == "download-yunet":
@@ -193,6 +206,7 @@ def main(argv: list[str] | None = None) -> None:
                 crop_scale=args.crop_scale,
                 start=args.start,
                 stop=args.stop,
+                progress=not args.no_progress,
             )
             parsing.save(args.parsing, overwrite=args.overwrite)
             print(f"Saved {len(parsing.frames)} parsed frames to {args.parsing}")
@@ -214,6 +228,7 @@ def main(argv: list[str] | None = None) -> None:
                 mask=_mask_from_args(args),
                 format=args.format,
                 overwrite=args.overwrite,
+                progress=not args.no_progress,
             )
             print(f"Wrote {report.frame_count} mask frames to {report.output} ({report.codec})")
         elif args.command == "analyze":
@@ -241,6 +256,7 @@ def main(argv: list[str] | None = None) -> None:
                 detector=detector,
                 detection_interval=args.detection_interval,
                 tracker=IoUTracker(max_missing=args.max_missing),
+                progress=not args.no_progress,
             )
             analysis.save(args.analysis)
             print(f"Saved {len(analysis.frames)} analyzed frames to {args.analysis}")
@@ -255,6 +271,7 @@ def main(argv: list[str] | None = None) -> None:
                 mask=mask,
                 codec=args.codec,
                 overwrite=args.overwrite,
+                progress=not args.no_progress,
             )
             print(f"Wrote {report.frame_count} frames to {report.output} (video only)")
     except (OSError, ValueError, VideoError) as exc:

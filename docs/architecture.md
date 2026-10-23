@@ -118,17 +118,31 @@ when available because remapped tracked points can lag real image features.
 Existing caches lack explicit measurement links, so these are reconstructed
 with gated one-to-one IoU association. Tracked points are used without raw data.
 These thresholds are heuristic and do not measure silhouette accuracy. The
-default geometric fallback uses the measured box when available, favors
-coverage, and can include hair or ears.
-`fallback="error"` instead refuses the frame. Per-frame diagnostics distinguish
-accepted, held, and fallback cases. Unusable parses clear accepted-label history.
-An optional per-track recovery counter requires consecutive usable observations
-before returning from geometry to semantics. Invalid or missing observations
-interrupt the counter. It never delays entry into fallback or creates a partial
-crossfade. Default recovery is one observation, preserving earlier behavior.
-Missing observations reuse the last accepted labels and freeze alpha. Gaps,
-absent IDs, and box IoU below 0.1 reset history. Stale held tracks still require
-motion-aware tracking to cover moving faces reliably.
+default `fallback="hold"` retains the last accepted semantic alpha and transports
+it using the tracked box's translation and scale. Every carried frame samples
+the accepted anchor, avoiding accumulated interpolation blur. Unusable current
+labels do not replace that anchor or veto its shape. A fresh accepted parse
+restores the usual current-label exclusions. The anchor can become stale as
+hair, expression, pose, or occlusion changes.
+
+The hold budget is measured from the last accepted parse, with a default of 15
+decoded frames. Unusable parses and missing observations cannot refresh it.
+Without an accepted anchor, or beyond the budget, hold mode raises and export
+does not publish. It never inserts a geometric mask. Frame gaps, absent IDs,
+and anchor/current box IoU below 0.1 clear the available history. Tracks must
+remain active, and movement during detection gaps requires motion-aware boxes.
+Diagnostics distinguish `held_missing`, `held_empty`, `held_incomplete`, and
+`held_recovery` from a fresh `parsed` shape.
+
+Explicit `fallback="geometry"` uses measured boxes when available, favors
+coverage, and can include hair or ears. Unusable parses clear its accepted-label
+history. Missing observations can reuse the last accepted labels. The
+`fallback="error"` policy refuses any unusable parse immediately. An optional
+per-track recovery counter requires consecutive usable observations before
+accepting a fresh shape after a failure. Hold mode carries the anchor during
+recovery. Geometric mode retains geometry. Invalid or missing observations
+interrupt the counter, and recovery never extends the hold budget. Default
+recovery is one observation. There is no crossfade into a partially opaque face.
 
 Each effect receives a private copy of the original RGB crop. Effects never
 read another face's transformed pixels. Results are blended in increasing track

@@ -15,6 +15,7 @@ from typing import Literal
 import cv2
 import numpy as np
 
+from ._progress import frame_progress
 from .analysis import VideoAnalysis, file_sha256
 from .masks import FaceMask, LandmarkFaceMask, MaskProvider, MaskSession
 from .video import RenderReport, VideoError, VideoExportWarning, _frames, _reader, _verify_export
@@ -38,6 +39,7 @@ def export_masks(
     mask: FaceMask | LandmarkFaceMask | MaskProvider | None = None,
     format: Literal["mov", "png"] = "mov",
     overwrite: bool = False,
+    progress: bool = True,
 ) -> RenderReport:
     """Export white faces on black, with gray feathering and maximum overlap.
 
@@ -126,7 +128,12 @@ def export_masks(
                     )
                 else:
                     temporary.mkdir()
-                with _reader(source) as (capture, info):
+                with (
+                    _reader(source) as (capture, info),
+                    frame_progress(
+                        "Exporting masks", total=len(analysis.frames), enabled=progress
+                    ) as bar,
+                ):
                     if info != analysis.video:
                         raise VideoError("Video metadata does not match the analysis")
                     for index, _ in enumerate(_frames(capture, info)):
@@ -148,6 +155,7 @@ def export_masks(
                                 raise VideoError(f"PNG mask verification failed at frame {index}")
                         count += 1
                         face_instances += len(analysis.frames[index].faces)
+                        bar.update()
                     if count != len(analysis.frames):
                         raise VideoError("Video contains fewer frames than its analysis")
                 if process is not None:
@@ -156,7 +164,7 @@ def export_masks(
                         errors.seek(0)
                         detail = errors.read().decode(errors="replace")
                         raise VideoError(f"FFmpeg mask encoding failed: {detail}")
-                    _verify_export(temporary, analysis.video, count)
+                    _verify_export(temporary, analysis.video, count, progress=progress)
                 else:
                     metadata = {
                         "format": "anamorph_mask_sequence",

@@ -145,7 +145,9 @@ def test_total_erosion_does_not_revive_temporal_history():
 def test_custom_fallback_geometry_is_independent_of_semantic_boundary_edits():
     analysis, parsing = cache(maps=[(np.zeros((48, 64), np.uint8),)])
     geometry = LandmarkFaceMask(scale_x=1.5, scale_y=1.3, feather=0)
-    session = ParsedFaceMask(parsing, fallback_mask=geometry, expansion=-20).create_session()
+    session = ParsedFaceMask(
+        parsing, fallback="geometry", fallback_mask=geometry, expansion=-20
+    ).create_session()
     actual = full(session.build(analysis.frames[0], 64, 48)[0])
     expected = full(geometry.build(FACE.box, 64, 48, landmarks=FACE.landmarks))
     np.testing.assert_array_equal(actual, expected)
@@ -156,7 +158,7 @@ def test_semantic_fallback_protects_a_measured_profile_nose_outside_its_box():
     marks = Landmarks(NAMES, ((12, 12), (20, 12), (4, 16), (13, 20), (19, 20)))
     frame = FrameAnalysis(0, (replace(FACE, landmarks=marks),))
     analysis, parsing = cache((frame,))
-    session = ParsedFaceMask(parsing).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry").create_session()
     alpha = full(session.build(analysis.frames[0], 64, 48)[0])
     assert session.diagnostics == {0: "fallback_incomplete"}
     assert alpha[16, 4] == 1
@@ -211,7 +213,7 @@ def test_recovery_requires_consecutive_observations_and_preserves_fallback_cover
         frames,
         [(labels(),), (empty,), (labels(),), (empty,), (labels(),), (labels(),), (labels(),)],
     )
-    session = ParsedFaceMask(parsing, recovery_frames=3).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry", recovery_frames=3).create_session()
     statuses = []
     for frame in analysis.frames:
         alpha = full(session.build(frame, 64, 48)[0])
@@ -243,7 +245,7 @@ def test_held_observations_cannot_complete_recovery():
     analysis, parsing = cache(
         frames, [(np.zeros((48, 64), np.uint8),), (labels(),), (), (labels(),), (labels(),)]
     )
-    session = ParsedFaceMask(parsing, recovery_frames=2).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry", recovery_frames=2).create_session()
     statuses = []
     for frame in analysis.frames:
         session.build(frame, 64, 48)
@@ -261,12 +263,153 @@ def test_recovery_state_resets_across_absence_or_frame_gap():
     frames = (FrameAnalysis(0, (FACE,)), FrameAnalysis(1), FrameAnalysis(2, (FACE,)))
     analysis, parsing = cache(frames, [(np.zeros((48, 64), np.uint8),), (), (labels(),)])
     for skip_absent in [False, True]:
-        session = ParsedFaceMask(parsing, recovery_frames=3).create_session()
+        session = ParsedFaceMask(parsing, fallback="geometry", recovery_frames=3).create_session()
         session.build(analysis.frames[0], 64, 48)
         if not skip_absent:
             session.build(analysis.frames[1], 64, 48)
         session.build(analysis.frames[2], 64, 48)
         assert session.diagnostics == {0: "parsed"}
+
+
+@pytest.mark.parametrize("expansion", [0, -2])
+def test_default_holds_semantic_shape_through_rejected_parses(expansion):
+    empty = np.zeros((48, 64), np.uint8)
+    incomplete = labels()
+    incomplete[16, 16] = 17
+    recovered = labels()
+    recovered[9:11, 9:11] = 17
+    analysis, parsing = cache(
+        tuple(FrameAnalysis(i, (FACE,)) for i in range(4)),
+        [(labels(),), (empty,), (incomplete,), (recovered,)],
+    )
+    session = ParsedFaceMask(parsing, feather=3, expansion=expansion).create_session()
+    initial = full(session.build(analysis.frames[0], 64, 48)[0])
+    for index, status in [(1, "held_empty"), (2, "held_incomplete")]:
+        held = full(session.build(analysis.frames[index], 64, 48)[0])
+        np.testing.assert_array_equal(held, initial)
+        assert session.diagnostics == {0: status}
+    final = full(session.build(analysis.frames[3], 64, 48)[0])
+    assert np.all(final[9:11, 9:11] == 0)
+    assert session.diagnostics == {0: "parsed"}
+
+
+def test_semantic_hold_translates_and_scales_with_the_track():
+    moved = replace(
+        FACE, box=Box(10, 8, 30, 28), landmarks=MARKS.remap(FACE.box, Box(10, 8, 30, 28))
+    )
+    grown = replace(
+        FACE, box=Box(12, 6, 52, 46), landmarks=MARKS.remap(FACE.box, Box(12, 6, 52, 46))
+    )
+    analysis, parsing = cache(
+        (FrameAnalysis(0, (FACE,)), FrameAnalysis(1, (moved,)), FrameAnalysis(2, (grown,))),
+        [(labels(),), (np.zeros((48, 64), np.uint8),), (np.zeros((48, 64), np.uint8),)],
+    )
+    session = ParsedFaceMask(parsing, feather=0).create_session()
+    initial = full(session.build(analysis.frames[0], 64, 48)[0])
+    actual = full(session.build(analysis.frames[1], 64, 48)[0])
+    expected = np.zeros_like(initial)
+    expected[2:, 4:] = initial[:-2, :-4]
+    np.testing.assert_array_equal(actual, expected)
+    enlarged = full(session.build(analysis.frames[2], 64, 48)[0])
+    assert enlarged[20, 24] == 1
+    assert enlarged[6, 24] == 0  # Transported hair exclusion above the forehead.
+    assert np.count_nonzero(enlarged == 1) > np.count_nonzero(initial == 1)
+
+
+def test_semantic_hold_uses_the_accepted_anchor_without_accumulating_blur():
+    faces = [replace(FACE, box=Box(6 + i * 0.2, 6, 26 + i * 0.2, 26)) for i in range(6)]
+    frames = tuple(FrameAnalysis(i, (face,)) for i, face in enumerate(faces))
+    empty = np.zeros((48, 64), np.uint8)
+    analysis, parsing = cache(frames, [(labels(),)] + [(empty,)] * 5)
+    session = ParsedFaceMask(parsing, feather=3).create_session()
+    for frame in analysis.frames:
+        gradual = full(session.build(frame, 64, 48)[0])
+    direct_analysis, direct_parsing = cache(
+        (frames[0], FrameAnalysis(1, (faces[-1],))), [(labels(),), (empty,)]
+    )
+    direct_session = ParsedFaceMask(direct_parsing, feather=3).create_session()
+    direct_session.build(direct_analysis.frames[0], 64, 48)
+    direct = full(direct_session.build(direct_analysis.frames[1], 64, 48)[0])
+    np.testing.assert_array_equal(gradual, direct)
+
+
+def test_semantic_hold_limit_counts_missing_and_rejected_frames_without_refreshing():
+    held = replace(FACE, observed=False, missing_frames=1)
+    analysis, parsing = cache(
+        (
+            FrameAnalysis(0, (FACE,)),
+            FrameAnalysis(1, (FACE,)),
+            FrameAnalysis(2, (held,)),
+            FrameAnalysis(3, (FACE,)),
+        ),
+        [(labels(),), (np.zeros((48, 64), np.uint8),), (), (np.zeros((48, 64), np.uint8),)],
+    )
+    session = ParsedFaceMask(parsing, max_hold_frames=2).create_session()
+    for frame in analysis.frames[:3]:
+        session.build(frame, 64, 48)
+    assert session.diagnostics == {0: "held_missing"}
+    with pytest.raises(ValueError, match="hold limit of 2 frames.*track 0 at frame 3"):
+        session.build(analysis.frames[3], 64, 48)
+
+
+@pytest.mark.parametrize("reset", ["absence", "gap", "new_id", "jump"])
+def test_semantic_hold_cannot_reuse_a_shape_after_track_reset(reset):
+    face = replace(FACE, observed=False, missing_frames=1)
+    if reset == "new_id":
+        face = replace(face, track_id=1)
+    if reset == "jump":
+        face = replace(face, box=Box(40, 20, 60, 40))
+    if reset in ("absence", "gap"):
+        frames = (FrameAnalysis(0, (FACE,)), FrameAnalysis(1), FrameAnalysis(2, (face,)))
+        maps = [(labels(),), (), ()]
+    else:
+        frames = (FrameAnalysis(0, (FACE,)), FrameAnalysis(1, (face,)))
+        maps = [(labels(),), ()]
+    analysis, parsing = cache(frames, maps)
+    session = ParsedFaceMask(parsing).create_session()
+    session.build(analysis.frames[0], 64, 48)
+    if reset == "absence":
+        session.build(analysis.frames[1], 64, 48)
+    with pytest.raises(ValueError, match="No accepted semantic mask"):
+        session.build(analysis.frames[-1], 64, 48)
+
+
+def test_semantic_hold_requires_an_initial_accepted_shape():
+    analysis, parsing = cache(maps=[(np.zeros((48, 64), np.uint8),)])
+    with pytest.raises(ValueError, match="No accepted semantic mask.*track 0 at frame 0"):
+        ParsedFaceMask(parsing).create_session().build(analysis.frames[0], 64, 48)
+
+
+def test_semantic_hold_recovery_preserves_shape_until_consecutive_usable_observations():
+    held = replace(FACE, observed=False, missing_frames=1)
+    recovered = labels()
+    recovered[9:11, 9:11] = 17
+    analysis, parsing = cache(
+        (
+            FrameAnalysis(0, (FACE,)),
+            FrameAnalysis(1, (FACE,)),
+            FrameAnalysis(2, (FACE,)),
+            FrameAnalysis(3, (held,)),
+            FrameAnalysis(4, (FACE,)),
+            FrameAnalysis(5, (FACE,)),
+        ),
+        [
+            (labels(),),
+            (np.zeros((48, 64), np.uint8),),
+            (recovered,),
+            (),
+            (recovered,),
+            (recovered,),
+        ],
+    )
+    session = ParsedFaceMask(parsing, recovery_frames=2, feather=0).create_session()
+    initial = full(session.build(analysis.frames[0], 64, 48)[0])
+    for frame in analysis.frames[1:5]:
+        np.testing.assert_array_equal(full(session.build(frame, 64, 48)[0]), initial)
+    assert session.diagnostics == {0: "held_recovery"}
+    final = full(session.build(analysis.frames[5], 64, 48)[0])
+    assert np.all(final[9:11, 9:11] == 0)
+    assert session.diagnostics == {0: "parsed"}
 
 
 def test_current_semantics_veto_previous_mask_after_temporal_filtering():
@@ -328,7 +471,7 @@ def test_raw_landmarks_prevent_accepting_mask_that_only_covers_smoothed_points()
     )
     frame = FrameAnalysis(0, (FACE,), (measured,))
     analysis, parsing = cache((frame,))
-    session = ParsedFaceMask(parsing).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry").create_session()
     result = full(session.build(analysis.frames[0], 64, 48)[0])
     assert session.diagnostics == {0: "fallback_incomplete"}
     assert result[6, 12] == 1
@@ -339,7 +482,7 @@ def test_face_extent_rejects_patch_even_when_all_feature_points_are_covered():
     data[8:11, 8:24] = 0
     data[21:24, 8:24] = 0
     analysis, parsing = cache(maps=[(data,)])
-    session = ParsedFaceMask(parsing).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry").create_session()
     session.build(analysis.frames[0], 64, 48)
     assert session.diagnostics == {0: "fallback_incomplete"}
 
@@ -370,7 +513,7 @@ def test_unusable_parsing_falls_back_explicitly_or_refuses(empty):
     if not empty:
         data[16, 16] = 17
     analysis, parsing = cache(maps=[(data,)])
-    session = ParsedFaceMask(parsing).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry").create_session()
     region = session.build(analysis.frames[0], 64, 48)[0]
     assert session.diagnostics[0] == ("fallback_empty" if empty else "fallback_incomplete")
     assert full(region)[16, 16] == 1
@@ -387,7 +530,7 @@ def test_held_parse_freezes_and_absent_id_clears_history():
         FrameAnalysis(3, (held,)),
     )
     analysis, parsing = cache(frames, [(labels(),), (), (), ()])
-    session = ParsedFaceMask(parsing).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry").create_session()
     initial = full(session.build(analysis.frames[0], 64, 48)[0])
     np.testing.assert_array_equal(full(session.build(analysis.frames[1], 64, 48)[0]), initial)
     assert session.diagnostics == {0: "held"}
@@ -402,7 +545,7 @@ def test_frame_gap_clears_held_history():
         (FrameAnalysis(0, (FACE,)), FrameAnalysis(1), FrameAnalysis(2, (held,))),
         [(labels(),), (), ()],
     )
-    session = ParsedFaceMask(parsing).create_session()
+    session = ParsedFaceMask(parsing, fallback="geometry").create_session()
     session.build(analysis.frames[0], 64, 48)
     session.build(analysis.frames[2], 64, 48)
     assert session.diagnostics == {0: "fallback_missing"}
@@ -546,6 +689,50 @@ def test_parse_and_lossless_render_reuse_inference(video, detector, tmp_path):
     assert parser.calls == 6 and detector.calls == 6
 
 
+def test_export_cli_defaults_to_semantic_hold_and_preserves_destination_on_expiry(
+    video, detector, tmp_path
+):
+    source, _ = video
+    analysis = analyze_video(source, detector=detector, progress=False)
+    parsing = parse_video(source, analysis=analysis, parser=ControlledParser(), progress=False)
+    parsing = replace(
+        parsing,
+        frames=(parsing.frames[0],)
+        + tuple(
+            tuple(replace(record, labels=np.zeros_like(record.labels)) for record in frame)
+            for frame in parsing.frames[1:]
+        ),
+    )
+    cache_path, parsing_path = tmp_path / "analysis.json", tmp_path / "parsing.npz"
+    analysis.save(cache_path)
+    parsing.save(parsing_path)
+    args = [
+        "export-masks",
+        str(source),
+        str(cache_path),
+        str(tmp_path / "held"),
+        "--shape",
+        "parsed",
+        "--parsing",
+        str(parsing_path),
+        "--format",
+        "png",
+        "--no-progress",
+    ]
+    with pytest.warns(VideoExportWarning):
+        main(args)
+    reference = cv2.imread(str(tmp_path / "held/mask_00000000.png"), cv2.IMREAD_UNCHANGED)
+    assert np.any(reference == 65535)
+    for index in range(1, 6):
+        actual = cv2.imread(str(tmp_path / f"held/mask_{index:08d}.png"), cv2.IMREAD_UNCHANGED)
+        np.testing.assert_array_equal(actual, reference)
+    args[3] = str(tmp_path / "expired")
+    with pytest.warns(VideoExportWarning), pytest.raises(SystemExit) as error:
+        main([*args, "--max-hold-frames", "2"])
+    assert error.value.code == 2
+    assert not (tmp_path / "expired").exists()
+
+
 def test_partial_cache_and_held_inference_schedule(video, detector):
     source, _ = video
     analysis = analyze_video(source, detector=detector, detection_interval=2)
@@ -672,6 +859,9 @@ def test_render_rejects_different_track_analysis_before_export(video, detector, 
         {"recovery_frames": 0},
         {"recovery_frames": True},
         {"recovery_frames": 1.5},
+        {"max_hold_frames": 0},
+        {"max_hold_frames": True},
+        {"max_hold_frames": 1.5},
     ],
 )
 def test_mask_parameter_validation(kwargs):

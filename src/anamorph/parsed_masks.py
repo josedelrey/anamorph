@@ -44,8 +44,11 @@ class ParsedFaceMask:
     included_labels can change coverage without inference. fallback='geometry'
     uses an unsegmented geometric mask for unusable parses, prioritizing face
     coverage. These fallbacks can include hair and ears. fallback='error'
-    refuses them. Inspect session.diagnostics to distinguish parsed, held,
-    and fallback masks.
+    refuses them. The default fallback='hold' transports the last accepted alpha
+    with the tracked box for up to max_hold_frames without a fresh accepted
+    parse. It raises if no accepted shape is available or the limit is exceeded.
+    It never inserts geometry. Carried exclusions are estimates of old boundaries.
+    Inspect session.diagnostics to distinguish parsed, held, and fallback masks.
 
     expansion is a signed full-frame pixel distance. Positive values grow the
     opaque core into background. boundary_labels can explicitly permit a limited
@@ -55,20 +58,21 @@ class ParsedFaceMask:
     Edits stop at the parsing crop edges. Quality checks run BEFORE edits, so
     deliberate erosion cannot be mistaken for a parsing failure. fallback_mask
     controls geometric fallbacks independently of accepted semantic masks.
-    recovery_frames requires consecutive usable observed parses before leaving
-    a fallback. Failures enter fallback immediately. This reduces rapid toggling
-    while retaining current coverage, at the cost of longer geometric coverage.
+    recovery_frames requires consecutive usable observed parses before updating
+    a held shape or leaving geometry. Failures enter the chosen fallback policy
+    immediately. Recovery never extends the semantic hold budget.
     """
 
     parsing: VideoParsing
     feather: float = 2
     stabilization: float = 0.65
     included_labels: tuple[str, ...] = _FACE_LABELS
-    fallback: Literal["geometry", "error"] = "geometry"
+    fallback: Literal["geometry", "error", "hold"] = "hold"
     expansion: float = 0
     fallback_mask: LandmarkFaceMask = field(default_factory=LandmarkFaceMask)
     boundary_labels: tuple[str, ...] = ("background",)
     recovery_frames: int = 1
+    max_hold_frames: int = 15
 
     def __post_init__(self) -> None:
         if not isinstance(self.parsing, VideoParsing):
@@ -77,12 +81,14 @@ class ParsedFaceMask:
             raise ValueError("feather must be finite and nonnegative")
         if not math.isfinite(self.stabilization) or not 0 < self.stabilization <= 1:
             raise ValueError("stabilization must be in (0, 1]")
-        if self.fallback not in ("geometry", "error"):
-            raise ValueError("fallback must be geometry or error")
+        if self.fallback not in ("geometry", "error", "hold"):
+            raise ValueError("fallback must be geometry, error, or hold")
         if not math.isfinite(self.expansion):
             raise ValueError("expansion must be finite")
         if type(self.recovery_frames) is not int or self.recovery_frames < 1:
             raise ValueError("recovery_frames must be a positive integer")
+        if type(self.max_hold_frames) is not int or self.max_hold_frames < 1:
+            raise ValueError("max_hold_frames must be a positive integer")
         if not isinstance(self.fallback_mask, LandmarkFaceMask):
             raise ValueError("fallback_mask must be a LandmarkFaceMask")
         if (
@@ -186,6 +192,17 @@ def _warp_previous(region: MaskRegion, old_box: Box, new_box: Box, bounds: tuple
     return cv2.remap(region.alpha, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
 
+def _remap_bounds(bounds: tuple, old_box: Box, new_box: Box) -> tuple[int, int, int, int]:
+    a, b, c, d = bounds
+    sx, sy = new_box.width / old_box.width, new_box.height / old_box.height
+    return (
+        math.floor(new_box.x1 + (a - old_box.x1) * sx),
+        math.floor(new_box.y1 + (b - old_box.y1) * sy),
+        math.ceil(new_box.x1 + (c - old_box.x1) * sx),
+        math.ceil(new_box.y1 + (d - old_box.y1) * sy),
+    )
+
+
 def _edit_core(core: np.ndarray, allowed: np.ndarray, expansion: float) -> np.ndarray:
     if expansion > 0:
         return (distance_transform_edt(~core) <= expansion) & allowed
@@ -262,8 +279,34 @@ class ParsedMaskSession:
         self.diagnostics: dict[int, str] = {}
         self._last_index = -1
         self._history: dict[int, tuple[Face, MaskRegion, FaceParsing]] = {}
+        self._accepted_at: dict[int, int] = {}
         self._recovering: dict[int, tuple[Box, int]] = {}
         self._fallback = mask.fallback_mask
+
+    def _hold(
+        self,
+        face: Face,
+        previous: tuple[Face, MaskRegion, FaceParsing] | None,
+        index: int,
+        width: int,
+        height: int,
+    ) -> MaskRegion:
+        if previous is None:
+            raise ValueError(
+                f"No accepted semantic mask to hold for track {face.track_id} at frame {index}"
+            )
+        if index - self._accepted_at[face.track_id] > self.mask.max_hold_frames:
+            raise ValueError(
+                f"Semantic hold limit of {self.mask.max_hold_frames} frames exceeded "
+                f"for track {face.track_id} at frame {index}"
+            )
+        old_face, old_region, _ = previous
+        bounds = Box(*_remap_bounds(old_region.bounds, old_face.box, face.box)).bounds(
+            width, height
+        )
+        if bounds is None:
+            raise ValueError(f"Held semantic mask is outside the frame for track {face.track_id}")
+        return MaskRegion(bounds, _warp_previous(old_region, old_face.box, face.box, bounds))
 
     def build(self, frame: FrameAnalysis, width: int, height: int) -> dict[int, MaskRegion]:
         return self._build(frame, width, height, None)
@@ -282,8 +325,19 @@ class ParsedMaskSession:
         parsed = {face.track_id: face for face in self.mask.parsing.for_frame(frame, width, height)}
         if frame.index != self._last_index + 1:
             self._history.clear()
+            self._accepted_at.clear()
             self._recovering.clear()
         regions, history, diagnostics, recovering = {}, {}, {}, {}
+        accepted_at = {}
+
+        def hold(face, previous, status, recovery=0):
+            regions[face.track_id] = self._hold(face, previous, frame.index, width, height)
+            # Retain the original accepted anchor to avoid accumulating warp blur.
+            history[face.track_id] = previous
+            accepted_at[face.track_id] = self._accepted_at[face.track_id]
+            diagnostics[face.track_id] = status
+            recovering[face.track_id] = (face.box, recovery)
+
         measurements = _measurements(frame)
         ids = tuple(FACE_PARSING_LABELS.index(name) for name in self.mask.included_labels)
         for face in frame.faces:
@@ -297,6 +351,9 @@ class ParsedMaskSession:
             fallback_box = measurement.box if measurement else face.box
             record = parsed.get(face.track_id)
             status = "parsed"
+            if record is None and self.mask.fallback == "hold":
+                hold(face, previous, "held_missing")
+                continue
             if record is None and previous is not None:
                 old_face, _, old_record = previous
                 old_box = old_face.box
@@ -306,18 +363,14 @@ class ParsedMaskSession:
                         old_face.landmarks.remap(old_box, face.box) if old_face.landmarks else None
                     ),
                 )
-                a, b, c, d = old_record.bounds
-                sx, sy = face.box.width / old_box.width, face.box.height / old_box.height
-                edges = (
-                    math.floor(face.box.x1 + (a - old_box.x1) * sx),
-                    math.floor(face.box.y1 + (b - old_box.y1) * sy),
-                    math.ceil(face.box.x1 + (c - old_box.x1) * sx),
-                    math.ceil(face.box.y1 + (d - old_box.y1) * sy),
-                )
+                edges = _remap_bounds(old_record.bounds, old_box, face.box)
                 record = FaceParsing(face.track_id, edges, old_record.labels)
                 status = "held"
             sampled = None if record is None else _labels_in_frame(record, width, height)
             if sampled is None:
+                if self.mask.fallback == "hold":
+                    hold(face, previous, "held_missing")
+                    continue
                 if self.mask.fallback == "error":
                     raise ValueError(
                         f"No usable parsing for track {face.track_id} at frame {frame.index}"
@@ -340,6 +393,9 @@ class ParsedMaskSession:
             )
             allowed = core | np.isin(labels, margin_ids)
             if not _usable_core(core, checked_face, bounds, width, height):
+                if self.mask.fallback == "hold":
+                    hold(face, previous, "held_empty" if not np.any(core) else "held_incomplete")
+                    continue
                 if self.mask.fallback == "error":
                     raise ValueError(
                         f"Incomplete parsing for track {face.track_id} at frame {frame.index}"
@@ -359,6 +415,9 @@ class ParsedMaskSession:
                 if pending is not None and pending[0].iou(face.box) >= 0.1:
                     count = pending[1] + 1 if face.observed else 0
                     if count < self.mask.recovery_frames:
+                        if self.mask.fallback == "hold":
+                            hold(face, previous, "held_recovery", count)
+                            continue
                         region = self._fallback.build(
                             fallback_box, width, height, landmarks=checked_face.landmarks
                         )
@@ -392,8 +451,12 @@ class ParsedMaskSession:
             region = MaskRegion(bounds, alpha.astype(np.float32))
             regions[face.track_id] = region
             history[face.track_id] = (checked_face, region, record)
+            accepted_at[face.track_id] = (
+                frame.index if status == "parsed" else self._accepted_at[face.track_id]
+            )
             diagnostics[face.track_id] = status
         self._history = history
+        self._accepted_at = accepted_at
         self._recovering = recovering
         self.diagnostics = diagnostics
         self._last_index = frame.index

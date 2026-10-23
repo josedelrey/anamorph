@@ -14,6 +14,7 @@ from typing import Protocol
 import cv2
 import numpy as np
 
+from ._progress import frame_progress
 from .analysis import VideoAnalysis, VideoInfo, file_sha256
 from .types import Box, FrameAnalysis, Image, validate_image
 
@@ -331,6 +332,7 @@ def parse_video(
     crop_scale: float = 1.8,
     start: int = 0,
     stop: int | None = None,
+    progress: bool = True,
 ) -> VideoParsing:
     """Parse observed tracks using cached detections, with no repeated detection.
 
@@ -352,7 +354,10 @@ def parse_video(
     if file_sha256(source) != analysis.source_sha256:
         raise VideoError("Analysis source SHA-256 does not match this video")
     frames = []
-    with _reader(source) as (capture, info):
+    with (
+        _reader(source) as (capture, info),
+        frame_progress("Parsing faces", total=stop - start, enabled=progress) as bar,
+    ):
         if info != analysis.video:
             raise VideoError("Video metadata does not match the analysis")
         for index, image in enumerate(_frames(capture, info)):
@@ -367,6 +372,7 @@ def parse_video(
                     labels = parser.parse(_parsing_crop(image, bounds))
                     records.append(FaceParsing(face.track_id, bounds, labels))
             frames.append(tuple(records))
+            bar.update()
     if len(frames) != stop - start:
         raise VideoError("Video ended before the requested parsing interval")
     if file_sha256(source) != analysis.source_sha256:

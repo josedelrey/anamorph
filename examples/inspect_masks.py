@@ -71,6 +71,8 @@ def main():
     parser.add_argument("--parsing", type=Path, help="Compare cached semantic masks to geometry")
     parser.add_argument("--stabilization", type=float, default=0.65)
     parser.add_argument("--recovery-frames", type=int, default=1)
+    parser.add_argument("--fallback", choices=["hold", "geometry", "error"], default="hold")
+    parser.add_argument("--max-hold-frames", type=int, default=15)
     parser.add_argument("--chin-extension", type=float, default=0.10)
     args = parser.parse_args()
     analysis = VideoAnalysis.load(args.analysis)
@@ -99,6 +101,8 @@ def main():
             feather=args.feather if args.feather is not None else 2,
             stabilization=args.stabilization,
             recovery_frames=args.recovery_frames,
+            fallback=args.fallback,
+            max_hold_frames=args.max_hold_frames,
         )
         if parsing
         else geometry_mask
@@ -115,6 +119,7 @@ def main():
             "included_labels": mask.included_labels,
             "fallback": mask.fallback,
             "recovery_frames": mask.recovery_frames,
+            "max_hold_frames": mask.max_hold_frames,
             "parsing_sha256": file_sha256(args.parsing),
         }
         if parsing

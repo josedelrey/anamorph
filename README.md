@@ -22,7 +22,7 @@ This installs the library in editable mode and development tools in `.venv`.
 Use `uv sync --locked --no-dev` for runtime dependencies only. For an existing
 environment, `pip install .` also works. Anamorph is not yet published to PyPI.
 
-NumPy, SciPy, and `opencv-python-headless` are the runtime dependencies. OpenCV
+NumPy, SciPy, `opencv-python-headless`, and `tqdm` are the runtime dependencies. OpenCV
 provides codecs and a bundled frontal Haar cascade, so the default detector
 requires no separate model download. Avoid installing another OpenCV wheel
 alongside the headless package because they share the `cv2` namespace.
@@ -339,7 +339,7 @@ render_video(
     "outputs/parsed_blur.mp4",
     analysis=analysis,
     effect=GaussianBlur(16),
-    mask=ParsedFaceMask(parsing, feather=2, fallback="geometry"),
+    mask=ParsedFaceMask(parsing, feather=2),
 )
 ```
 
@@ -372,24 +372,51 @@ Tiny regions, limited face extent, and uncovered visible feature points fail
 a coverage check. When raw detections are available, checks use their measured
 points instead of points remapped into smoothed boxes. Matching reconstructs
 measurement links using gated one-to-one box association. Without raw detections,
-tracked points remain estimates. By default, failed checks use a geometric
-fallback anchored to the measured box when available, which can include hair and
-ears. Set `fallback="error"` to refuse such frames. These checks are heuristics,
-not a complete silhouette assessment. `mask.create_session().diagnostics`
-reports `parsed`, `held`, `fallback_empty`, `fallback_incomplete`, or
-`fallback_missing` after `build(frame_analysis, width, height)`. Held tracks
-reuse their previous accepted labels and remain stale without motion prediction.
+tracked points remain estimates. These checks are heuristics, not a complete
+silhouette assessment.
+
+**The default `fallback="hold"` keeps the last accepted semantic mask** when a
+parse fails or a detection is missing. Its position and scale follow the tracked
+box, retaining the previous face contour, feathering, and hair/ear exclusions
+instead of switching to an oval. Each held frame is sampled from the last
+accepted mask to avoid accumulating interpolation blur. A fresh usable parse
+updates the shape and its class exclusions normally.
+
+`max_hold_frames=15` limits the number of decoded frames since the last accepted
+parse. Held or rejected observations never refresh this limit. When the limit
+is exceeded, or no accepted mask exists for a track, rendering stops with an
+error instead of introducing geometric coverage. History is cleared by frame
+gaps, absent track IDs, and large box jumps. Holding needs an active track and
+cannot recover a face after track expiry. Position follows the cached boxes,
+which remain static during missed detections unless motion tracking is enabled.
+The carried shape cannot follow new rotations, expressions, or occlusions, so
+old hair exclusions may drift. This mode prioritizes visual continuity and does
+not guarantee coverage of newly exposed face areas.
+
+Use `fallback="geometry"` explicitly for the previous conservative coverage
+policy, anchored to measured boxes when available, which can include hair and
+ears. `fallback="error"` refuses every unusable parse immediately.
+`mask.create_session().diagnostics` reports `parsed`, `held_missing`,
+`held_empty`, `held_incomplete`, or `held_recovery` in hold mode. Geometric mode
+retains `held`, `fallback_empty`, `fallback_incomplete`, `fallback_missing`,
+and `fallback_recovery` diagnostics.
 
 `recovery_frames=3` requires three consecutive usable observed parses before
-switching back from geometry to semantics after a failure. An unusable parse
-still triggers fallback immediately. Pending recovery is reported as
-`fallback_recovery`. Missing observations interrupt recovery. Frame gaps,
-absent tracks, and large box jumps reset it. The default `1` preserves immediate
-recovery. Longer recovery can reduce rapid switching but keeps broader geometric
-masks, including possible hair/ear coverage, for longer. It is not a crossfade
-and never fades in the current opaque face core. The CLI and inspection example
-accept `--recovery-frames` for parsed masks. Inspection reports count adjacent
-semantic/fallback switches separately from geometric boundary motion.
+updating a held shape or switching back from geometry after a failure. Missing
+or invalid observations interrupt recovery. The default `1` accepts the first
+usable parse immediately. Recovery never extends the hold limit. The CLI and
+inspection example accept `--fallback`, `--max-hold-frames`, and
+`--recovery-frames` for parsed masks. Inspection reports count adjacent
+semantic/geometric switches separately from boundary motion.
+
+To reuse existing analysis and parsing with the default semantic hold:
+
+```bash
+uv run anamorph export-masks local_inputs/clip.mp4 outputs/analysis.json outputs/face_masks.mov --shape parsed --parsing outputs/parsing.npz
+```
+
+Add `--max-hold-frames 25` to allow up to 25 frames without a fresh usable parse,
+or `--fallback geometry` to choose geometric fallbacks explicitly.
 
 `expansion` grows or shrinks the opaque core by a signed distance in source
 pixels. Positive values grow into background while retaining predicted hair,
@@ -530,6 +557,16 @@ uv run python examples/process_video.py local_inputs/clip.mp4 outputs/comparison
 and tracking options. `--codec FFV1` with an `.avi` output is useful for lossless
 experiments when supported. The default `mp4v` codec is intended for `.mp4`.
 YAML configuration is deferred until experiments demonstrate a need for it.
+
+Analysis, motion replay, parsing, rendering, and mask export show `tqdm` progress
+bars by default, with a separate bar when verifying an encoded video. Bars go
+to standard error, keeping command results on standard output. Add
+`--no-progress` to `analyze`, `parse`, `render`, or `export-masks` to disable them,
+or pass `progress=False` to the corresponding Python APIs, including
+`track_video` and `process_video`. Initial analysis uses the decoder's frame
+count estimate, or a running frame counter when no usable estimate is available.
+Later passes use the cached frame count. Partial parsing counts only the
+requested interval.
 
 For direct array processing, use `GaussianBlur(...).apply(rgb)`, or create a
 `FrameRenderer(effect, mask)` and call `render(rgb, frame_analysis,

@@ -17,6 +17,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ._progress import frame_progress
 from .analysis import VideoAnalysis, VideoInfo, file_sha256
 from .compositing import FrameRenderer
 from .detection import FaceDetector, HaarFaceDetector
@@ -82,6 +83,7 @@ def analyze_video(
     tracker: IoUTracker | None = None,
     detection_interval: int = 1,
     motion: SparseOpticalFlow | None = None,
+    progress: bool = True,
 ) -> VideoAnalysis:
     """Decode once, detect, associate faces, and return reusable geometry.
 
@@ -96,6 +98,7 @@ def analyze_video(
         tracker=tracker if tracker is not None else IoUTracker(),
         detection_interval=detection_interval,
         motion=motion,
+        progress=progress,
     )
 
 
@@ -105,6 +108,7 @@ def track_video(
     analysis: VideoAnalysis,
     motion: SparseOpticalFlow,
     tracker: IoUTracker | None = None,
+    progress: bool = True,
 ) -> VideoAnalysis:
     """Replay cached raw detections with image-derived motion, without inference.
 
@@ -125,6 +129,7 @@ def track_video(
         tracker=tracker if tracker is not None else IoUTracker(),
         detection_interval=interval,
         motion=motion,
+        progress=progress,
         cached=analysis,
     )
 
@@ -137,6 +142,7 @@ def _analyze_video(
     detection_interval: int,
     motion: SparseOpticalFlow | None = None,
     cached: VideoAnalysis | None = None,
+    progress: bool = True,
 ) -> VideoAnalysis:
     if type(detection_interval) is not int or detection_interval < 1:
         raise ValueError("detection_interval must be a positive integer")
@@ -150,7 +156,16 @@ def _analyze_video(
     tracker.reset()
     records, diagnostics, cuts = [], [], []
     previous, faces = None, ()
-    with _reader(source) as (capture, info):
+    with (
+        _reader(source) as (capture, info),
+        frame_progress(
+            "Tracking" if cached is not None else "Analyzing",
+            total=len(cached.frames)
+            if cached is not None
+            else capture.get(cv2.CAP_PROP_FRAME_COUNT),
+            enabled=progress,
+        ) as bar,
+    ):
         if cached is not None and info != cached.video:
             raise VideoError("Video metadata differs from cached analysis")
         for index, image in enumerate(_frames(capture, info)):
@@ -186,6 +201,7 @@ def _analyze_video(
                 )
             )
             previous = image if motion is not None else None
+            bar.update()
     if not records:
         raise VideoError("Video contains no decodable frames")
     if file_sha256(source) != source_hash:
@@ -224,13 +240,19 @@ def _analyze_video(
     )
 
 
-def _verify_export(path: Path, expected: VideoInfo, count: int) -> None:
-    with _reader(path) as (capture, actual):
+def _verify_export(path: Path, expected: VideoInfo, count: int, *, progress: bool = True) -> None:
+    with (
+        _reader(path) as (capture, actual),
+        frame_progress("Verifying export", total=count, enabled=progress) as bar,
+    ):
         if (actual.width, actual.height) != (expected.width, expected.height):
             raise VideoError("Encoder changed video dimensions")
         if not math.isclose(actual.fps, expected.fps, rel_tol=1e-3, abs_tol=1e-3):
             raise VideoError("Encoder changed video frame rate")
-        decoded = sum(1 for _ in _frames(capture, actual))
+        decoded = 0
+        for _ in _frames(capture, actual):
+            decoded += 1
+            bar.update()
         if decoded != count:
             raise VideoError(f"Encoded frame count mismatch: expected {count}, decoded {decoded}")
 
@@ -244,6 +266,7 @@ def render_video(
     mask: FaceMask | LandmarkFaceMask | MaskProvider | None = None,
     codec: str = "mp4v",
     overwrite: bool = False,
+    progress: bool = True,
 ) -> RenderReport:
     """Render without inference, verify encoding, then publish the output.
 
@@ -283,7 +306,10 @@ def render_video(
     writer = None
     count, face_instances = 0, 0
     try:
-        with _reader(source) as (capture, info):
+        with (
+            _reader(source) as (capture, info),
+            frame_progress("Rendering", total=len(analysis.frames), enabled=progress) as bar,
+        ):
             if info != analysis.video:
                 raise VideoError("Video metadata does not match the analysis")
             writer = cv2.VideoWriter(
@@ -299,11 +325,12 @@ def render_video(
                 writer.write(cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
                 count += 1
                 face_instances += len(record.faces)
+                bar.update()
             if count != len(analysis.frames):
                 raise VideoError("Video contains fewer frames than its analysis")
         writer.release()
         writer = None
-        _verify_export(temporary, analysis.video, count)
+        _verify_export(temporary, analysis.video, count, progress=progress)
         if file_sha256(source) != analysis.source_sha256:
             raise VideoError("Source changed during rendering")
         if overwrite:
@@ -330,6 +357,7 @@ def process_video(
     motion: SparseOpticalFlow | None = None,
     codec: str = "mp4v",
     overwrite: bool = False,
+    progress: bool = True,
 ) -> RenderReport:
     """Convenience two-pass analysis and rendering. Use separate calls for reuse."""
     analysis = analyze_video(
@@ -338,6 +366,7 @@ def process_video(
         tracker=tracker,
         detection_interval=detection_interval,
         motion=motion,
+        progress=progress,
     )
     return render_video(
         source,
@@ -347,4 +376,5 @@ def process_video(
         mask=mask,
         codec=codec,
         overwrite=overwrite,
+        progress=progress,
     )
