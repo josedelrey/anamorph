@@ -13,6 +13,7 @@ license-files = ["LICENSE"]
 dependencies = [
     "numpy>=1.26,<3",
     "opencv-python-headless>=4.10,<5",
+    "pyyaml>=6,<7",
     "scipy>=1.12,<2",
     "tqdm>=4.66,<5",
 ]
@@ -35,4 +36,4 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.uv.build-backend]
-source-include = ["tests/**", "examples/**", "docs/**"]
+source-include = ["tests/**", "examples/**", "docs/**", "scripts/**", "configs/**"]

@@ -22,7 +22,7 @@ This installs the library in editable mode and development tools in `.venv`.
 Use `uv sync --locked --no-dev` for runtime dependencies only. For an existing
 environment, `pip install .` also works. Anamorph is not yet published to PyPI.
 
-NumPy, SciPy, `opencv-python-headless`, and `tqdm` are the runtime dependencies. OpenCV
+NumPy, SciPy, `opencv-python-headless`, `tqdm`, and PyYAML are the runtime dependencies. OpenCV
 provides codecs and a bundled frontal Haar cascade, so the default detector
 requires no separate model download. Avoid installing another OpenCV wheel
 alongside the headless package because they share the `cv2` namespace.
@@ -580,6 +580,44 @@ Use **Video** data levels for the MOV or **Full** levels for the PNG sequence,
 and avoid applying grades, LUTs, or color transforms to matte values. Align
 the matte and footage before trimming, scaling, or retiming them together.
 Mask quality and detection limitations are the same as normal rendering.
+
+### Export from a YAML preset
+
+Run the complete preparation, detection, parsing, and mask-export pipeline with
+[scripts/export_face_masks.py](scripts/export_face_masks.py) and
+[configs/face_masks.yaml](configs/face_masks.yaml):
+
+```bash
+uv run python scripts/export_face_masks.py /path/to/input.MTS --config configs/face_masks.yaml
+```
+
+The input path is supplied at runtime. Model and output paths inside the YAML
+are relative to the YAML file, independent of the working directory. The preset
+uses local YuNet and ResNet34 parsing models, YuNet's 640-pixel inference limit
+and 0.7 score threshold, semantic hold, 4-pixel expansion, a 64-pixel outward fade,
+all boundary classes, and 1% island cleanup. The output is ProRes 4444 MOV.
+
+Preparation reproduces the current interlaced-source workflow: deinterlace,
+1920 x 1080 square pixels at 25 FPS, ProRes HQ video and PCM audio. This preset
+is specific to that source format. For an already prepared progressive clip,
+set `prepare.enabled: false` to process it directly. Adapt the filter and frame
+rate for other sources. Use the prepared `footage.mov` as the timeline source
+when preparation is enabled, keeping the matte's pixels and timing aligned.
+
+Outputs go into `outputs/face_masks/<input-stem>/` by default. They include
+`face_masks.mov`, `analysis.json`, `parsing.npz`, and a `config.yaml` snapshot with
+resolved paths. Preparation also retains `footage.mov`. Override the run folder
+with `--output-dir /path/to/output`. All processing settings, progress bars,
+and overwrite behavior are controlled by the YAML. Existing products are
+refused by default. `output.overwrite: true` recomputes every stage and replaces
+MOV/cache products. PNG sequence directories always require a new destination.
+Choose `output.format: png` for lossless 16-bit frames and timing metadata.
+
+The script needs the local models and FFmpeg already installed. It performs
+fresh detection and parsing on each run. The saved caches can subsequently be
+reused with `anamorph export-masks` when tuning mask settings. Semantic hold
+retains its normal lifetime and seed requirements, so a clip without an initial
+usable semantic mask can still fail instead of substituting an oval.
 
 ### CLI and examples
 

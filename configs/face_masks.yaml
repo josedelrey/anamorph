@@ -1,0 +1,61 @@
+# Supply the input video on the command line. Paths below are relative to this file.
+version: 1
+
+runtime:
+  progress: true
+  opencv_threads: 1
+
+# Matches the preparation used for the current interlaced, anamorphic source.
+# Disable for footage already prepared with these settings.
+prepare:
+  enabled: true
+  filter: "bwdif=mode=send_frame,scale=1920:1080,setsar=1"
+  fps: 25
+  video_codec: prores_ks
+  profile: 3
+  pixel_format: yuv422p10le
+  audio_codec: pcm_s16le
+
+detector:
+  model: ../local_inputs/models/yunet/face_detection_yunet_2023mar.onnx
+  score_threshold: 0.7
+  nms_threshold: 0.3
+  top_k: 5000
+  max_size: 640
+  detection_interval: 1
+
+tracker:
+  min_iou: 0.2
+  max_missing: 5
+  smoothing: 0.7
+
+parsing:
+  model: ../local_inputs/models/face_parsing/resnet34.onnx
+  crop_scale: 1.8
+
+mask:
+  included_labels:
+    - skin
+    - left_brow
+    - right_brow
+    - left_eye
+    - right_eye
+    - glasses
+    - nose
+    - mouth
+    - upper_lip
+    - lower_lip
+  boundary_labels: all
+  expansion: 4
+  feather: 64
+  stabilization: 0.65
+  fallback: hold
+  max_hold_frames: 15
+  recovery_frames: 1
+  island_area_threshold: 0.01
+
+output:
+  # Each input gets a subdirectory named after its filename without the extension.
+  directory: ../outputs/face_masks
+  format: mov
+  overwrite: false
