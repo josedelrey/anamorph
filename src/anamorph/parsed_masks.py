@@ -55,7 +55,10 @@ class ParsedFaceMask:
     margin into other classes, for example to correct a misplaced hairline. This
     trades semantic exclusion for coverage. Negative expansion erodes the core,
     deliberately reducing face coverage. Disconnected facial components veto growth.
-    Edits stop at the parsing crop edges. Quality checks run BEFORE edits, so
+    Output margins extend beyond the parsing crop into unclassified background.
+    Temporal support also remains inside the output working region. Distance
+    smoothing suppresses ridges from pixel-stepped contours before feathering.
+    Quality checks run BEFORE edits, so
     deliberate erosion cannot be mistaken for a parsing failure. fallback_mask
     controls geometric fallbacks independently of accepted semantic masks.
     recovery_frames requires consecutive usable observed parses before updating
@@ -118,18 +121,35 @@ class ParsedFaceMask:
 
 
 def _labels_in_frame(
-    parsed: FaceParsing, width: int, height: int
+    parsed: FaceParsing,
+    width: int,
+    height: int,
+    *,
+    padding: int = 0,
+    extra_bounds: tuple[int, int, int, int] | None = None,
+    clip: bool = True,
 ) -> tuple[tuple, np.ndarray] | None:
-    bounds = Box(*parsed.bounds).bounds(width, height)
+    a, b, c, d = parsed.bounds
+    left, top, right, bottom = a - padding, b - padding, c + padding, d + padding
+    if extra_bounds is not None:
+        left, top = min(left, extra_bounds[0]), min(top, extra_bounds[1])
+        right, bottom = max(right, extra_bounds[2]), max(bottom, extra_bounds[3])
+    bounds = (
+        Box(left, top, right, bottom).bounds(width, height) if clip else (left, top, right, bottom)
+    )
     if bounds is None:
         return None
     x1, y1, x2, y2 = bounds
-    a, b, c, d = parsed.bounds
     gh, gw = parsed.labels.shape
     # Pixel-center mapping, including un-clipped crop geometry at image borders.
     ix = np.floor((np.arange(x1, x2) + 0.5 - a) * gw / (c - a)).astype(int)
     iy = np.floor((np.arange(y1, y2) + 0.5 - b) * gh / (d - b)).astype(int)
     labels = parsed.labels[np.ix_(np.clip(iy, 0, gh - 1), np.clip(ix, 0, gw - 1))]
+    # Pixels beyond the inference crop have no labels. Treat them as background
+    # for the output margin, without replicating facial classes into that margin.
+    inside_x = (np.arange(x1, x2) + 0.5 >= a) & (np.arange(x1, x2) + 0.5 < c)
+    inside_y = (np.arange(y1, y2) + 0.5 >= b) & (np.arange(y1, y2) + 0.5 < d)
+    labels[~(inside_y[:, None] & inside_x[None, :])] = 0
     return bounds, labels
 
 
@@ -203,6 +223,37 @@ def _remap_bounds(bounds: tuple, old_box: Box, new_box: Box) -> tuple[int, int, 
     )
 
 
+def _prior_support(previous: tuple[Face, MaskRegion, FaceParsing], face: Face) -> tuple | None:
+    old_face, region, _ = previous
+    x, y, w, h = cv2.boundingRect((region.alpha > 0).astype(np.uint8))
+    if w == 0 or h == 0:
+        return None
+    # Include the interpolation footprint when transporting the old alpha.
+    bounds = (
+        region.bounds[0] + x - 1,
+        region.bounds[1] + y - 1,
+        region.bounds[0] + x + w + 1,
+        region.bounds[1] + y + h + 1,
+    )
+    return _remap_bounds(bounds, old_face.box, face.box)
+
+
+def _feather_core(core: np.ndarray, feather: float) -> np.ndarray:
+    if feather == 0 or not np.any(core):
+        return core.astype(np.float32)
+    distance = cv2.distanceTransform((~core).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    # A broad distance ramp exposes ridges from the stepped label contour.
+    # Smooth the distance field before tapering, keeping the opaque core exact.
+    sigma = feather / 8
+    radius = math.ceil(3 * sigma)
+    kernel = (2 * radius + 1, 2 * radius + 1)
+    distance = cv2.GaussianBlur(distance, kernel, sigma, borderType=cv2.BORDER_REPLICATE)
+    t = np.clip(distance / feather, 0, 1)
+    alpha = 1 - t * t * (3 - 2 * t)
+    alpha[core] = 1
+    return alpha
+
+
 def _edit_core(core: np.ndarray, allowed: np.ndarray, expansion: float) -> np.ndarray:
     if expansion > 0:
         return (distance_transform_edt(~core) <= expansion) & allowed
@@ -215,6 +266,12 @@ def _edit_core(core: np.ndarray, allowed: np.ndarray, expansion: float) -> np.nd
 
 def _usable_core(core: np.ndarray, face: Face, bounds: tuple, width: int, height: int) -> bool:
     """Reject tiny patches and parses that leave visible measured features exposed."""
+    clipped = Box(*bounds).bounds(width, height)
+    if clipped is None:
+        return False
+    a, b, c, d = clipped
+    core = core[b - bounds[1] : d - bounds[1], a - bounds[0] : c - bounds[0]]
+    bounds = clipped
     visible = face.box.bounds(width, height)
     if visible is None:
         return False
@@ -366,7 +423,17 @@ class ParsedMaskSession:
                 edges = _remap_bounds(old_record.bounds, old_box, face.box)
                 record = FaceParsing(face.track_id, edges, old_record.labels)
                 status = "held"
-            sampled = None if record is None else _labels_in_frame(record, width, height)
+            # Reserve the outward margin and the smoothing kernel's footprint.
+            padding = math.ceil(max(0, self.mask.expansion) + self.mask.feather)
+            padding += math.ceil(3 * self.mask.feather / 8)
+            extra = _prior_support(previous, face) if previous is not None else None
+            sampled = (
+                None
+                if record is None
+                else _labels_in_frame(
+                    record, width, height, padding=padding, extra_bounds=extra, clip=False
+                )
+            )
             if sampled is None:
                 if self.mask.fallback == "hold":
                     hold(face, previous, "held_missing")
@@ -427,13 +494,7 @@ class ParsedMaskSession:
                         recovering[face.track_id] = (face.box, count)
                         continue
                 core = _edit_core(core, allowed, self.mask.expansion)
-                alpha = core.astype(np.float32)
-                if self.mask.feather > 0 and np.any(core):
-                    distance = cv2.distanceTransform(
-                        (~core).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
-                    )
-                    t = np.clip(distance / self.mask.feather, 0, 1)
-                    alpha = 1 - t * t * (3 - 2 * t)
+                alpha = _feather_core(core, self.mask.feather)
                 if self.mask.expansion < 0:
                     # Deliberate shrinkage must not be undone by carried history.
                     allowed &= alpha > 0
@@ -449,7 +510,15 @@ class ParsedMaskSession:
             # can receive margin coverage. Disconnected faces remain excluded.
             alpha[~allowed] = 0
             region = MaskRegion(bounds, alpha.astype(np.float32))
-            regions[face.track_id] = region
+            # Clip only the public output. Offscreen semantic support must remain
+            # in history so a frame edge cannot move inward as a rectangular cut.
+            clipped = Box(*bounds).bounds(width, height)
+            if clipped is not None:
+                x1, y1, x2, y2 = clipped
+                regions[face.track_id] = MaskRegion(
+                    clipped,
+                    region.alpha[y1 - bounds[1] : y2 - bounds[1], x1 - bounds[0] : x2 - bounds[0]],
+                )
             history[face.track_id] = (checked_face, region, record)
             accepted_at[face.track_id] = (
                 frame.index if status == "parsed" else self._accepted_at[face.track_id]

@@ -422,7 +422,10 @@ or `--fallback geometry` to choose geometric fallbacks explicitly.
 pixels. Positive values grow into background while retaining predicted hair,
 ear, and neck exclusions. Negative values deliberately remove facial coverage,
 then apply the outward feather. Temporal history cannot undo deliberate shrinkage.
-Edits stop at the parsing crop boundary. Coverage checks run before these edits.
+The output region includes enough space for expansion, feathering, and carried
+temporal support. It can extend beyond the inference crop, where pixels have no
+semantic labels and are treated as background for the margin. The actual video
+frame still clips the output. Coverage checks run before these edits.
 The CLI exposes this control as `--expansion` with `--shape parsed`.
 
 For a known boundary error, `boundary_labels=("background", "neck")` permits
@@ -448,6 +451,15 @@ margin, and disconnected faces remain excluded. Use
 Omitting the option retains strict hair, ear, and neck exclusions. The semantic
 hold fallback carries the softened shape during failed parses. Existing analysis
 and parsing caches can be reused.
+
+Feathering smooths the contour's distance field before applying its fade. This
+reduces line-like ridges around stepped segmentation edges while keeping the
+selected opaque core white. The output region also includes the transported
+previous mask's support, preventing rectangular cutoffs when the inference crop
+changes. History retains offscreen support so a clipped video edge cannot move
+into view as a hard boundary during holding. Only the displayed output is
+clipped to the video frame. Temporal filtering can still leave faint traces of
+earlier contours.
 
 Use `PerFaceMask` to give selected cached track IDs different configurations:
 

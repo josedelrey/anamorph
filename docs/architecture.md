@@ -104,9 +104,12 @@ seeds, the component with the greatest overlap with the track box is selected.
 This excludes disconnected neighboring faces, but touching components and bad
 tracks can remain ambiguous. Enclosed background holes are filled without
 filling excluded semantic classes. Accepted core pixels remain opaque.
-Outward smoothstep feathering is measured in source pixels and may enter only
-predicted background. A box-relative resampling of prior alpha stabilizes each
-track. Current coverage is retained, and excluded labels are vetoed last.
+Outward smoothstep feathering is measured in source pixels. The distance field
+is Gaussian-smoothed at one eighth of the feather width to suppress ridges from
+the stepped label contour. The opaque core remains exact. Feathering may enter
+predicted background and explicitly allowed boundary classes. A box-relative
+resampling of prior alpha stabilizes each track. Current coverage is retained,
+and excluded labels are vetoed last.
 Consequently, an old skin prediction cannot paint over current hair labels.
 
 A parse is rejected if its selected area is below 15 percent of the visible
@@ -288,6 +291,16 @@ apart from explicitly allowed `boundary_labels`. Negative expansion clips
 history to the edited mask's feather support. Quality gates inspect the raw
 semantic core before deliberate edits. Geometric fallback shape has its own
 configuration and remains an instantaneous estimate.
+
+The output working region extends beyond the inference crop by the expansion,
+feather width, and smoothing-kernel radius. It also contains transported prior
+alpha support, including its interpolation footprint. This prevents rectangular
+cutoffs when crop size or position changes. Pixels outside the inference crop
+have no semantic labels and are treated as background for the margin. Only the
+physical frame boundary clips the public output region. Internal history retains
+offscreen alpha from the inference crop and output margin. This prevents an old
+video boundary from becoming an interior cutoff when a held mask moves. Coverage
+checks consider only visible pixels even when the working region is offscreen.
 
 `anamorph.evaluation` measures masks against reference polygons independently
 of model labels. The replayable evaluation example binds annotations to video,

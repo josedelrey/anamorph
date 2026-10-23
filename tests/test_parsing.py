@@ -129,7 +129,8 @@ def test_expanded_mask_fades_to_black_across_semantic_boundaries():
     assert original[5, 16] == 0
     assert alpha[10, 16] == 1
     assert alpha[6, 16] == 1
-    assert alpha[5, 16] == pytest.approx(0.84375)
+    assert 0 < alpha[5, 16] < 1
+    assert np.all(np.diff(alpha[1:7, 16]) >= 0)
     assert alpha[1, 16] == 0
 
 
@@ -142,6 +143,80 @@ def test_boundary_class_tolerance_is_explicit_and_limited_to_the_margin():
     assert alpha[6, 16] == 1 and alpha[5, 16] == 0
     assert alpha[25, 16] == 1 and alpha[26, 16] == 0
     assert np.all(alpha[np.isin(labels(), [7, 8])] == 0)
+
+
+def test_feather_extends_beyond_the_inference_crop_without_a_rectangular_cut():
+    face = Face(0, Box(20, 15, 40, 35))
+    analysis, parsing = cache((FrameAnalysis(0, (face,)),))
+    parsing = replace(
+        parsing, frames=((FaceParsing(0, (16, 10, 42, 38), np.ones((28, 26), np.uint8)),),)
+    )
+    region = (
+        ParsedFaceMask(parsing, feather=8).create_session().build(analysis.frames[0], 64, 48)[0]
+    )
+    alpha = full(region)
+    assert region.bounds[2] > 42
+    assert alpha[24, 41] == 1
+    assert 0 < alpha[24, 42] < 1
+    assert alpha[24, 54] == 0
+    assert np.all(alpha[10:38, 16:42] == 1)
+
+
+def test_changing_crop_does_not_clip_the_transport_of_previous_feather():
+    face = Face(0, Box(20, 15, 40, 35))
+    analysis, parsing = cache((FrameAnalysis(0, (face,)), FrameAnalysis(1, (face,))))
+    parsing = replace(
+        parsing,
+        frames=(
+            (FaceParsing(0, (8, 10, 60, 38), np.ones((28, 52), np.uint8)),),
+            (FaceParsing(0, (16, 10, 42, 38), np.ones((28, 26), np.uint8)),),
+        ),
+    )
+    session = ParsedFaceMask(parsing, feather=4, stabilization=0.65).create_session()
+    session.build(analysis.frames[0], 64, 48)
+    region = session.build(analysis.frames[1], 64, 48)[0]
+    alpha = full(region)
+    assert region.bounds[2] > 57
+    assert alpha[24, 57] == pytest.approx(0.35)
+    assert alpha[24, 35] == 1
+
+
+def test_feather_reduces_ridges_from_a_stepped_contour_without_weakening_the_core():
+    from anamorph.parsed_masks import _feather_core
+
+    core = np.zeros((192, 160), bool)
+    for y in range(192):
+        core[y, 64 + 4 * ((y // 8) % 2) : 140] = True
+    distance = cv2.distanceTransform((~core).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    t = np.clip(distance / 32, 0, 1)
+    unfiltered = 1 - t * t * (3 - 2 * t)
+    alpha = _feather_core(core, 32)
+    old_ridges = np.max(np.abs(np.diff(unfiltered[20:172, 44:57], n=2, axis=0)))
+    new_ridges = np.max(np.abs(np.diff(alpha[20:172, 44:57], n=2, axis=0)))
+    assert new_ridges < old_ridges / 4
+    assert np.all(alpha[core] == 1)
+    assert np.all((alpha >= 0) & (alpha <= 1))
+    assert np.all(alpha[:, :20] == 0)
+
+
+def test_semantic_hold_keeps_offscreen_shape_when_a_frame_edge_moves_inward():
+    first = Face(0, Box(20, -8, 40, 12))
+    moved = Face(0, Box(20, 0, 40, 20), observed=False, missing_frames=1)
+    analysis, parsing = cache(
+        (FrameAnalysis(0, (first,)), FrameAnalysis(1, (moved,))), [(labels(),), ()]
+    )
+    parsing = replace(
+        parsing, frames=((FaceParsing(0, (16, -12, 42, 16), np.ones((28, 26), np.uint8)),), ())
+    )
+    session = ParsedFaceMask(parsing, feather=8).create_session()
+    initial = session.build(analysis.frames[0], 64, 48)[0]
+    assert initial.bounds[1] == 0
+    moved_region = session.build(analysis.frames[1], 64, 48)[0]
+    alpha = full(moved_region)
+    assert alpha[2, 30] == 1
+    assert alpha[7, 30] == 1
+    assert alpha[8, 30] == 1
+    assert moved_region.bounds[1] == 0
 
 
 def test_total_erosion_does_not_revive_temporal_history():
