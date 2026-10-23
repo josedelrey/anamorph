@@ -117,6 +117,22 @@ def test_negative_expansion_erodes_core_before_feathering():
     np.testing.assert_array_equal(full(region), expected)
 
 
+def test_expanded_mask_fades_to_black_across_semantic_boundaries():
+    analysis, parsing = cache()
+    strict = ParsedFaceMask(parsing, expansion=2, feather=4)
+    labels_allowed = tuple(
+        label for label in FACE_PARSING_LABELS if label not in strict.included_labels
+    )
+    soft = replace(strict, boundary_labels=labels_allowed)
+    alpha = full(soft.create_session().build(analysis.frames[0], 64, 48)[0])
+    original = full(strict.create_session().build(analysis.frames[0], 64, 48)[0])
+    assert original[5, 16] == 0
+    assert alpha[10, 16] == 1
+    assert alpha[6, 16] == 1
+    assert alpha[5, 16] == pytest.approx(0.84375)
+    assert alpha[1, 16] == 0
+
+
 def test_boundary_class_tolerance_is_explicit_and_limited_to_the_margin():
     analysis, parsing = cache()
     mask = ParsedFaceMask(
@@ -731,6 +747,69 @@ def test_export_cli_defaults_to_semantic_hold_and_preserves_destination_on_expir
         main([*args, "--max-hold-frames", "2"])
     assert error.value.code == 2
     assert not (tmp_path / "expired").exists()
+
+
+@pytest.mark.parametrize("boundary_labels", [("all",), ("background", "hair")])
+def test_export_cli_softens_selected_semantic_boundaries(
+    video, detector, tmp_path, boundary_labels
+):
+    source, _ = video
+    analysis = analyze_video(source, detector=detector, progress=False)
+    parsing = parse_video(source, analysis=analysis, parser=ControlledParser(), progress=False)
+    analysis_path, parsing_path = tmp_path / "analysis.json", tmp_path / "parsing.npz"
+    analysis.save(analysis_path)
+    parsing.save(parsing_path)
+    output = tmp_path / "soft"
+    with pytest.warns(VideoExportWarning):
+        main(
+            [
+                "export-masks",
+                str(source),
+                str(analysis_path),
+                str(output),
+                "--shape",
+                "parsed",
+                "--parsing",
+                str(parsing_path),
+                "--format",
+                "png",
+                "--expansion",
+                "2",
+                "--feather",
+                "4",
+                "--no-progress",
+                "--boundary-labels",
+                *boundary_labels,
+            ]
+        )
+    mask = ParsedFaceMask(parsing, expansion=2, feather=4)
+    allowed = (
+        tuple(label for label in FACE_PARSING_LABELS if label not in mask.included_labels)
+        if boundary_labels == ("all",)
+        else boundary_labels
+    )
+    region = (
+        replace(mask, boundary_labels=allowed).create_session().build(analysis.frames[0], 64, 48)[0]
+    )
+    expected = np.zeros((48, 64), np.uint16)
+    x1, y1, x2, y2 = region.bounds
+    expected[y1:y2, x1:x2] = np.rint(region.alpha * 65535).astype(np.uint16)
+    actual = cv2.imread(str(output / "mask_00000000.png"), cv2.IMREAD_UNCHANGED)
+    np.testing.assert_array_equal(actual, expected)
+    assert np.any((actual > 0) & (actual < 65535))
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "export-masks",
+                str(source),
+                str(analysis_path),
+                str(tmp_path / "invalid"),
+                "--format",
+                "png",
+                "--boundary-labels",
+                "all",
+            ]
+        )
 
 
 def test_partial_cache_and_held_inference_schedule(video, detector):

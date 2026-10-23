@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from .analysis import VideoAnalysis
@@ -12,7 +13,7 @@ from .mask_export import export_masks
 from .masks import FaceMask, LandmarkFaceMask
 from .models import download_face_parser_model, download_yunet_model
 from .parsed_masks import ParsedFaceMask
-from .parsing import BiSeNetFaceParser, VideoParsing, parse_video
+from .parsing import FACE_PARSING_LABELS, BiSeNetFaceParser, VideoParsing, parse_video
 from .tracking import IoUTracker
 from .video import VideoError, analyze_video, render_video
 
@@ -65,6 +66,13 @@ def _add_mask_options(parser: argparse.ArgumentParser) -> None:
         help="Radius fraction for geometric masks, source pixels for parsed masks",
     )
     parser.add_argument(
+        "--boundary-labels",
+        nargs="+",
+        choices=["all", *FACE_PARSING_LABELS],
+        help="Classes allowed for parsed expansion/feathering (default: background). "
+        "Use all to soften every boundary, including hair and ears",
+    )
+    parser.add_argument(
         "--chin-extension",
         type=float,
         default=0.10,
@@ -100,6 +108,16 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             recovery_frames=args.recovery_frames if args.recovery_frames is not None else 1,
             max_hold_frames=args.max_hold_frames if args.max_hold_frames is not None else 15,
         )
+        if args.boundary_labels is not None:
+            if "all" in args.boundary_labels:
+                if len(args.boundary_labels) != 1:
+                    raise ValueError("Use --boundary-labels all by itself")
+                labels = tuple(
+                    label for label in FACE_PARSING_LABELS if label not in mask.included_labels
+                )
+            else:
+                labels = tuple(args.boundary_labels)
+            mask = replace(mask, boundary_labels=labels)
     else:
         if args.parsing is not None:
             raise ValueError("--parsing requires --shape parsed")
@@ -109,6 +127,8 @@ def _mask_from_args(args: argparse.Namespace) -> FaceMask | LandmarkFaceMask | P
             raise ValueError("--recovery-frames requires --shape parsed")
         if args.max_hold_frames is not None:
             raise ValueError("Semantic hold options require --shape parsed")
+        if args.boundary_labels is not None:
+            raise ValueError("--boundary-labels requires --shape parsed")
         mask = (
             LandmarkFaceMask(
                 **mask_options,

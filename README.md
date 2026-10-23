@@ -432,6 +432,23 @@ ears explicitly allows coverage on those classes near the selected contour.
 This trades semantic exclusion for coverage and needs visual review. It does
 not correct the underlying model. Disconnected facial components remain excluded.
 
+For a larger mask with a smooth fade to black, combine `--expansion` and
+`--feather`. Both use source-frame pixels for parsed masks. The CLI's
+`--boundary-labels all` allows that margin to cross hair, ear, and neck boundaries
+so the semantic exclusions do not cut the feather short:
+
+```bash
+uv run anamorph export-masks local_inputs/clip.mp4 outputs/analysis.json outputs/soft_masks.mov --shape parsed --parsing outputs/parsing.npz --expansion 4 --feather 16 --boundary-labels all
+```
+
+This grows the white core by four pixels, then fades from white to black across
+the next sixteen pixels. The surrounding classes receive only this nearby
+margin, and disconnected faces remain excluded. Use
+`--boundary-labels background hair` to allow the margin only in those classes.
+Omitting the option retains strict hair, ear, and neck exclusions. The semantic
+hold fallback carries the softened shape during failed parses. Existing analysis
+and parsing caches can be reused.
+
 Use `PerFaceMask` to give selected cached track IDs different configurations:
 
 ```python
